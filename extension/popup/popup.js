@@ -97,6 +97,7 @@
 
   function displayProduct(product) {
     currentProduct = product;
+    btnImport.disabled = false;
 
     // Image
     if (product.images && product.images.length > 0) {
@@ -148,7 +149,6 @@
     }
 
     try {
-      // Determine error correction level and version based on data length
       const errorCorrection = QRCode.ErrorCorrectLevel.M;
       const qr = new QRCode(0, errorCorrection);
       qr.addData(url);
@@ -157,34 +157,31 @@
       const moduleCount = qr.getModuleCount();
       const canvas = qrCanvas;
       const ctx = canvas.getContext("2d");
+      const quietZoneModules = 4;
+      const totalModules = moduleCount + quietZoneModules * 2;
+      const targetSize = 320;
+      const modulePixelSize = Math.max(5, Math.floor(targetSize / totalModules));
+      const qrSize = totalModules * modulePixelSize;
+      const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
-      // Set canvas resolution for crisp rendering
-      const displaySize = 200;
-      const scale = 2; // 2x for retina
-      canvas.width = displaySize * scale;
-      canvas.height = displaySize * scale;
-      canvas.style.width = displaySize + "px";
-      canvas.style.height = displaySize + "px";
-      ctx.scale(scale, scale);
+      canvas.width = qrSize * dpr;
+      canvas.height = qrSize * dpr;
+      canvas.style.width = `${qrSize}px`;
+      canvas.style.height = `${qrSize}px`;
 
-      const padding = 12;
-      const cellSize = (displaySize - padding * 2) / moduleCount;
-
-      // White background
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, qrSize, qrSize);
       ctx.fillStyle = "#FFFFFF";
-      ctx.fillRect(0, 0, displaySize, displaySize);
+      ctx.fillRect(0, 0, qrSize, qrSize);
 
-      // Draw QR modules
-      ctx.fillStyle = "#2D3748";
+      ctx.fillStyle = "#000000";
       for (let row = 0; row < moduleCount; row++) {
         for (let col = 0; col < moduleCount; col++) {
           if (qr.isDark(row, col)) {
-            const x = padding + col * cellSize;
-            const y = padding + row * cellSize;
-            // Slightly rounded squares for a modern look
-            const radius = cellSize * 0.15;
-            roundRect(ctx, x, y, cellSize, cellSize, radius);
-            ctx.fill();
+            const x = (quietZoneModules + col) * modulePixelSize;
+            const y = (quietZoneModules + row) * modulePixelSize;
+            ctx.fillRect(x, y, modulePixelSize, modulePixelSize);
           }
         }
       }
@@ -194,23 +191,6 @@
       console.error("[GenShot TryOn] QR render error:", err);
       showError("Failed to generate QR code: " + err.message);
     }
-  }
-
-  /**
-   * Draw a rounded rectangle path.
-   */
-  function roundRect(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
   }
 
   // =========================================================================
@@ -289,7 +269,10 @@
   // =========================================================================
 
   async function createImportSession() {
-    if (!currentProduct) return;
+    if (!currentProduct) {
+      btnImport.disabled = false;
+      return;
+    }
 
     showState(stateImporting);
 
@@ -327,8 +310,9 @@
           return;
         }
 
-        // Build the deep link URL for the QR code
-        const qrUrl = `genshot-fit://import?sid=${encodeURIComponent(finalSid)}&sig=${encodeURIComponent(finalSig || "")}`;
+        const qrUrl = typeof qr_payload === "string" && qr_payload.length > 0
+          ? qr_payload
+          : `genshot-fit://import?sid=${encodeURIComponent(finalSid)}&sig=${encodeURIComponent(finalSig || "")}`;
         renderQrCode(qrUrl);
       } else {
         showError(response?.error || "Failed to create import session");
@@ -340,6 +324,8 @@
           ? "Cannot connect to the GenShot server. Make sure the backend is running."
           : err.message
       );
+    } finally {
+      btnImport.disabled = false;
     }
   }
 
@@ -348,10 +334,9 @@
   // =========================================================================
 
   btnImport.addEventListener("click", () => {
+    if (btnImport.disabled) return;
     btnImport.disabled = true;
-    createImportSession().finally(() => {
-      btnImport.disabled = false;
-    });
+    createImportSession();
   });
 
   btnRetry.addEventListener("click", () => {

@@ -2,32 +2,27 @@
 
 Takes the user's raw photo and generates a clean studio-quality reference:
 the same person wearing plain white basic clothing on a neutral studio
-background.  This core image is then used as the base for all virtual
+background. This core image is then used as the base for all virtual
 try-on generations.
 
-Model fallback chain:
-  gemini-3.1-pro-preview → gemini-3-pro-preview
+Uses the google-genai SDK with response_modalities for native image output.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Optional
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig, Part
+from google import genai
+from google.genai.types import GenerateContentConfig, Modality, Part
 
 from app.config import get_settings
 from app.services.storage import upload_image
 from app.utils.image_processing import resize_image
 
 logger = logging.getLogger(__name__)
-
-_GEMINI_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-3-pro-preview",
-]
 
 _CORE_IMAGE_PROMPT = (
     "You are a professional fashion photography studio system. "
@@ -48,41 +43,53 @@ _CORE_IMAGE_PROMPT = (
     "- Output only the image, no text or overlays."
 )
 
-_vertexai_initialized = False
+_client: Optional[genai.Client] = None
 
 
-def _ensure_vertexai() -> None:
-    global _vertexai_initialized
-    if _vertexai_initialized:
-        return
+def _get_client() -> genai.Client:
+    global _client
+    if _client is not None:
+        return _client
     settings = get_settings()
-    vertexai.init(
-        project=settings.GCP_PROJECT_ID,
-        location=settings.VERTEX_LOCATION,
-    )
-    _vertexai_initialized = True
+    os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.GCP_PROJECT_ID)
+    os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.VERTEX_LOCATION)
+    os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
+    _client = genai.Client()
+    return _client
 
 
-def _generate_core(reference_bytes: bytes, model_name: Optional[str] = None) -> Optional[bytes]:
+def _format_model_error(exc: Exception) -> str:
+    exc_name = type(exc).__name__
+    message = str(exc).strip()
+    message = " ".join(message.split())
+    if len(message) > 240:
+        message = f"{message[:240]}..."
+    return f"{exc_name}: {message}" if message else exc_name
+
+
+def _generate_core(reference_bytes: bytes) -> Optional[bytes]:
     """Generate a core studio image from the raw reference photo.
 
     Returns PNG bytes or ``None`` on failure.
     """
-    _ensure_vertexai()
+    client = _get_client()
+    settings = get_settings()
+    models_to_try = settings.CORE_IMAGE_MODELS
+    if not models_to_try:
+        logger.error("Core image generation has no configured models.")
+        return None
 
-    image_part = Part.from_data(data=reference_bytes, mime_type="image/png")
-    models_to_try = [model_name] if model_name else _GEMINI_MODELS
+    image_part = Part.from_bytes(data=reference_bytes, mime_type="image/png")
 
     for mname in models_to_try:
         try:
             logger.info("Core image generation: trying %s", mname)
-            model = GenerativeModel(mname)
-            response = model.generate_content(
-                [image_part, _CORE_IMAGE_PROMPT],
-                generation_config=GenerationConfig(
+            response = client.models.generate_content(
+                model=mname,
+                contents=[image_part, _CORE_IMAGE_PROMPT],
+                config=GenerateContentConfig(
                     temperature=0.3,
-                    max_output_tokens=8192,
-                    response_mime_type="image/png",
+                    response_modalities=[Modality.TEXT, Modality.IMAGE],
                 ),
             )
 
@@ -90,15 +97,12 @@ def _generate_core(reference_bytes: bytes, model_name: Optional[str] = None) -> 
                 for part in response.candidates[0].content.parts:
                     if part.inline_data and part.inline_data.data:
                         data = part.inline_data.data
-                        if isinstance(data, str):
-                            import base64
-                            data = base64.b64decode(data)
                         logger.info("Core image from %s: %d bytes", mname, len(data))
                         return data
 
             logger.warning("%s returned no image for core generation.", mname)
         except Exception as exc:
-            logger.warning("Core image generation with %s failed: %s", mname, exc)
+            logger.warning("Core image generation with %s failed: %s", mname, _format_model_error(exc))
             continue
 
     return None
@@ -110,17 +114,7 @@ async def generate_core_image(
 ) -> Optional[str]:
     """Generate a core reference image and upload it to GCS.
 
-    Parameters
-    ----------
-    user_id:
-        The Firebase UID.
-    reference_photo_url:
-        Public URL of the user's raw reference photo.
-
-    Returns
-    -------
-    str or None
-        Public GCS URL of the generated core image, or ``None`` on failure.
+    Returns the public GCS URL or ``None`` on failure.
     """
     import httpx
 

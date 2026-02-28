@@ -21,9 +21,51 @@
   if (document.getElementById("genshot-tryon-root")) return;
 
   // =========================================================================
+  // Extension context validity check
+  // =========================================================================
+
+  /** Returns true if the extension context is still alive. */
+  function isContextValid() {
+    try {
+      return !!(chrome && chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Safely send a message to the service worker. */
+  function safeSendMessage(message, callback) {
+    if (!isContextValid()) {
+      callback({ success: false, error: "Extension was reloaded. Please refresh the page." });
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(message, function (response) {
+        try {
+          if (chrome.runtime.lastError) {
+            callback({ success: false, error: chrome.runtime.lastError.message });
+            return;
+          }
+          callback(response);
+        } catch (err) {
+          callback({ success: false, error: "Extension context lost. Please refresh the page." });
+        }
+      });
+    } catch (err) {
+      callback({ success: false, error: "Extension context lost. Please refresh the page." });
+    }
+  }
+
+  // =========================================================================
   // Constants
   // =========================================================================
-  var ICON_URL = chrome.runtime.getURL("icons/icon48.png");
+  var ICON_URL;
+  try {
+    ICON_URL = chrome.runtime.getURL("icons/icon48.png");
+  } catch {
+    // Context already invalidated at load time — bail out
+    return;
+  }
 
   var CURRENCY_SYMBOLS = {
     USD: "$", EUR: "\u20AC", GBP: "\u00A3", SEK: "kr",
@@ -218,6 +260,7 @@
 
   function displayProduct(product) {
     currentProduct = product;
+    btnImport.disabled = false;
 
     if (product.images && product.images.length > 0) {
       productImg.src = product.images[0];
@@ -242,22 +285,8 @@
   }
 
   // =========================================================================
-  // QR Code rendering (mirrors popup.js logic)
+  // QR Code rendering
   // =========================================================================
-
-  function roundRect(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
-  }
 
   function renderQrCode(url) {
     if (typeof QRCode === "undefined") {
@@ -272,30 +301,31 @@
 
       var moduleCount = qr.getModuleCount();
       var ctx = qrCanvas.getContext("2d");
+      var quietZoneModules = 4;
+      var totalModules = moduleCount + quietZoneModules * 2;
+      var targetSize = 320;
+      var modulePixelSize = Math.max(5, Math.floor(targetSize / totalModules));
+      var qrSize = totalModules * modulePixelSize;
+      var dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
-      var displaySize = 200;
-      var scale = 2;
-      qrCanvas.width = displaySize * scale;
-      qrCanvas.height = displaySize * scale;
-      qrCanvas.style.width = displaySize + "px";
-      qrCanvas.style.height = displaySize + "px";
-      ctx.scale(scale, scale);
+      qrCanvas.width = qrSize * dpr;
+      qrCanvas.height = qrSize * dpr;
+      qrCanvas.style.width = qrSize + "px";
+      qrCanvas.style.height = qrSize + "px";
 
-      var padding = 12;
-      var cellSize = (displaySize - padding * 2) / moduleCount;
-
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, qrSize, qrSize);
       ctx.fillStyle = "#FFFFFF";
-      ctx.fillRect(0, 0, displaySize, displaySize);
+      ctx.fillRect(0, 0, qrSize, qrSize);
+      ctx.fillStyle = "#000000";
 
-      ctx.fillStyle = "#2D3748";
       for (var row = 0; row < moduleCount; row++) {
         for (var col = 0; col < moduleCount; col++) {
           if (qr.isDark(row, col)) {
-            var x = padding + col * cellSize;
-            var y = padding + row * cellSize;
-            var radius = cellSize * 0.15;
-            roundRect(ctx, x, y, cellSize, cellSize, radius);
-            ctx.fill();
+            var x = (quietZoneModules + col) * modulePixelSize;
+            var y = (quietZoneModules + row) * modulePixelSize;
+            ctx.fillRect(x, y, modulePixelSize, modulePixelSize);
           }
         }
       }
@@ -351,7 +381,10 @@
   // =========================================================================
 
   function createImportSession() {
-    if (!currentProduct) return;
+    if (!currentProduct) {
+      btnImport.disabled = false;
+      return;
+    }
 
     showState("creating");
 
@@ -369,34 +402,36 @@
       sizeChart: currentProduct.sizeChart,
     };
 
-    chrome.runtime.sendMessage(
+    safeSendMessage(
       { type: "CREATE_IMPORT_SESSION", payload: { items: [item] } },
       function (response) {
-        if (chrome.runtime.lastError) {
-          showError("Extension error: " + chrome.runtime.lastError.message);
-          return;
-        }
-
-        if (response && response.success && response.data) {
-          var data = response.data;
-          var sid = data.sessionId || data.session_id || data.sid;
-          var sig = data.signature || data.sig || "";
-
-          if (!sid) {
-            showError("Backend returned invalid session data");
-            return;
-          }
-
-          var qrUrl = "genshot-fit://import?sid=" + encodeURIComponent(sid) +
-                      "&sig=" + encodeURIComponent(sig);
-          renderQrCode(qrUrl);
-        } else {
+        if (!response || !response.success) {
           var errText = (response && response.error) || "Failed to create import session";
           if (errText.indexOf("Failed to fetch") !== -1 || errText.indexOf("NetworkError") !== -1) {
             errText = "Cannot connect to GenShot server. Is the backend running?";
           }
+          btnImport.disabled = false;
           showError(errText);
+          return;
         }
+
+        var data = response.data;
+        var sid = data.sessionId || data.session_id || data.sid;
+        var sig = data.signature || data.sig || "";
+        var qrPayload = data.qr_payload || data.qrPayload;
+
+        if (!sid) {
+          btnImport.disabled = false;
+          showError("Backend returned invalid session data");
+          return;
+        }
+
+        var qrUrl = typeof qrPayload === "string" && qrPayload.length > 0
+          ? qrPayload
+          : "genshot-fit://import?sid=" + encodeURIComponent(sid) +
+            "&sig=" + encodeURIComponent(sig);
+        renderQrCode(qrUrl);
+        btnImport.disabled = false;
       }
     );
   }
@@ -414,10 +449,23 @@
   backdrop.addEventListener("click", closeModal);
 
   btnImport.addEventListener("click", function () {
+    if (btnImport.disabled) return;
     btnImport.disabled = true;
-    createImportSession();
-    // Re-enable after a delay in case user closes and retries
-    setTimeout(function () { btnImport.disabled = false; }, 3000);
+    try {
+      if (!isContextValid()) {
+        btnImport.disabled = false;
+        showError("Extension was reloaded. Please refresh the page and try again.");
+        return;
+      }
+      createImportSession();
+    } catch (err) {
+      btnImport.disabled = false;
+      showError(
+        err && typeof err.message === "string" && err.message.indexOf("Extension context invalidated") !== -1
+          ? "Extension was reloaded. Please refresh the page and try again."
+          : "Failed to start import. Please try again."
+      );
+    }
   });
 
   btnRetry.addEventListener("click", function () {
@@ -467,6 +515,11 @@
 
   // MutationObserver catches pushState-driven SPAs (Zara, H&M)
   var navObserver = new MutationObserver(function () {
+    // Stop observing if extension context is invalidated
+    if (!isContextValid()) {
+      navObserver.disconnect();
+      return;
+    }
     if (window.location.href !== lastHref) {
       onNavigate();
     }

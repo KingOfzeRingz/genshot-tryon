@@ -102,6 +102,17 @@ async def run_generation(generation_id: str) -> None:
         image_urls = await generate_tryon_images(user_profile, items, body_vector)
 
         # ── 7. Persist results ────────────────────────────────────────
+        if not image_urls:
+            db.update_generation(generation_id, {
+                "status": "failed",
+                "images": [],
+                "fit_scores": fit_scores,
+                "error_message": "No try-on images were generated.",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.error("Generation %s failed: no images were generated.", generation_id)
+            return
+
         db.update_generation(generation_id, {
             "status": "completed",
             "images": image_urls,

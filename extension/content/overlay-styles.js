@@ -2,8 +2,8 @@
  * GenShot TryOn - Overlay Styles
  *
  * CSS string constant injected into the Shadow DOM of the embedded
- * Try-On button and overlay modal. Derived from the popup.css design
- * language (colors, radii, typography).
+ * Try-On button and overlay modal. Matches the iOS app's GlassTheme
+ * design language (colors, radii, typography).
  */
 
 // eslint-disable-next-line no-var
@@ -13,11 +13,11 @@ var GENSHOT_OVERLAY_CSS = `
    ============================ */
 :host {
   all: initial;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
   line-height: 1.5;
-  color: #2D3748;
+  color: #1A1A1A;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -39,26 +39,26 @@ var GENSHOT_OVERLAY_CSS = `
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 20px;
+  padding: 12px 22px;
   border: none;
   border-radius: 50px;
-  background: #6C5CE7;
+  background: #0088FF;
   color: #FFFFFF;
   font-family: inherit;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 16px rgba(108, 92, 231, 0.4),
-              0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 20px rgba(0, 136, 255, 0.35),
+              0 2px 6px rgba(0, 0, 0, 0.08);
   transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
   user-select: none;
 }
 
 .gs-fab:hover {
-  background: #5B4BD5;
+  background: #0077E6;
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(108, 92, 231, 0.5),
-              0 3px 6px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 24px rgba(0, 136, 255, 0.45),
+              0 3px 8px rgba(0, 0, 0, 0.1);
 }
 
 .gs-fab:active {
@@ -82,8 +82,9 @@ var GENSHOT_OVERLAY_CSS = `
   position: fixed;
   inset: 0;
   z-index: 2147483646;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(2px);
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   opacity: 0;
   transition: opacity 0.25s ease;
   pointer-events: none;
@@ -106,10 +107,13 @@ var GENSHOT_OVERLAY_CSS = `
   width: 380px;
   max-height: 90vh;
   overflow-y: auto;
-  background: #FFFFFF;
-  border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2),
-              0 4px 12px rgba(0, 0, 0, 0.08);
+  background: rgba(252, 252, 252, 0.95);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(199, 199, 199, 0.4);
+  border-radius: 22px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.15),
+              0 4px 16px rgba(0, 0, 0, 0.06);
   opacity: 0;
   transition: opacity 0.25s ease, transform 0.25s ease;
   pointer-events: none;
@@ -127,9 +131,9 @@ var GENSHOT_OVERLAY_CSS = `
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid #EDF2F7;
-  background: #FAFBFC;
-  border-radius: 16px 16px 0 0;
+  border-bottom: 1px solid rgba(199, 199, 199, 0.3);
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 22px 22px 0 0;
 }
 
 .gs-modal-logo {
@@ -147,8 +151,8 @@ var GENSHOT_OVERLAY_CSS = `
 .gs-modal-logo-text {
   font-size: 16px;
   font-weight: 700;
-  color: #2D3748;
-  letter-spacing: -0.02em;
+  color: #1A1A1A;
+  letter-spacing: -0.03em;
 }
 
 .gs-modal-close {
@@ -158,17 +162,17 @@ var GENSHOT_OVERLAY_CSS = `
   width: 32px;
   height: 32px;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
-  color: #A0AEC0;
+  color: rgba(26, 26, 26, 0.4);
   font-size: 20px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .gs-modal-close:hover {
-  background: #EDF2F7;
-  color: #4A5568;
+  background: rgba(199, 199, 199, 0.2);
+  color: #1A1A1A;
 }
 
 /* ---- Modal Body ---- */
@@ -183,9 +187,9 @@ var GENSHOT_OVERLAY_CSS = `
   display: flex;
   gap: 14px;
   padding: 14px;
-  background: #F7FAFC;
-  border: 1px solid #EDF2F7;
-  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(199, 199, 199, 0.4);
+  border-radius: 16px;
   margin-bottom: 16px;
 }
 
@@ -193,9 +197,9 @@ var GENSHOT_OVERLAY_CSS = `
   flex-shrink: 0;
   width: 80px;
   height: 100px;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
-  background: #EDF2F7;
+  background: #F5F5F5;
 }
 
 .gs-product-img {
@@ -218,13 +222,13 @@ var GENSHOT_OVERLAY_CSS = `
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #6C5CE7;
+  color: #0088FF;
 }
 
 .gs-product-name {
   font-size: 14px;
   font-weight: 600;
-  color: #2D3748;
+  color: #1A1A1A;
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -242,14 +246,14 @@ var GENSHOT_OVERLAY_CSS = `
 .gs-product-price {
   font-size: 15px;
   font-weight: 700;
-  color: #2D3748;
+  color: #1A1A1A;
 }
 
 .gs-product-color {
   font-size: 12px;
-  color: #A0AEC0;
+  color: rgba(26, 26, 26, 0.45);
   padding-left: 8px;
-  border-left: 1px solid #E2E8F0;
+  border-left: 1px solid rgba(199, 199, 199, 0.5);
 }
 
 /* ============================
@@ -261,20 +265,20 @@ var GENSHOT_OVERLAY_CSS = `
   justify-content: center;
   gap: 8px;
   width: 100%;
-  padding: 12px 20px;
+  padding: 13px 20px;
   border: none;
-  border-radius: 10px;
-  background: #6C5CE7;
+  border-radius: 14px;
+  background: #0088FF;
   color: #FFFFFF;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.2s ease, transform 0.1s ease;
 }
 
 .gs-btn-primary:hover {
-  background: #5B4BD5;
+  background: #0077E6;
 }
 
 .gs-btn-primary:active {
@@ -282,7 +286,7 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-btn-primary:disabled {
-  background: #B8B0E8;
+  background: rgba(0, 136, 255, 0.4);
   cursor: not-allowed;
   transform: none;
 }
@@ -292,10 +296,10 @@ var GENSHOT_OVERLAY_CSS = `
   align-items: center;
   justify-content: center;
   padding: 8px 20px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
+  border: 1px solid rgba(199, 199, 199, 0.5);
+  border-radius: 10px;
   background: #FFFFFF;
-  color: #4A5568;
+  color: #1A1A1A;
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -304,8 +308,8 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-btn-secondary:hover {
-  background: #F7FAFC;
-  border-color: #CBD5E0;
+  background: #F5F5F5;
+  border-color: rgba(199, 199, 199, 0.7);
 }
 
 /* ============================
@@ -321,12 +325,12 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid #EDF2F7;
-  border-top-color: #6C5CE7;
+  width: 28px;
+  height: 28px;
+  border: 2.5px solid rgba(199, 199, 199, 0.35);
+  border-top-color: #0088FF;
   border-radius: 50%;
-  animation: gs-spin 0.8s linear infinite;
+  animation: gs-spin 0.7s linear infinite;
 }
 
 @keyframes gs-spin {
@@ -335,7 +339,7 @@ var GENSHOT_OVERLAY_CSS = `
 
 .gs-loading-text {
   font-size: 13px;
-  color: #A0AEC0;
+  color: rgba(26, 26, 26, 0.45);
   font-weight: 500;
 }
 
@@ -355,33 +359,30 @@ var GENSHOT_OVERLAY_CSS = `
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  background: #E6FFFA;
-  border: 1px solid #B2F5EA;
+  background: rgba(29, 163, 113, 0.1);
+  border: 1px solid rgba(29, 163, 113, 0.25);
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
-  color: #234E52;
+  color: #1DA371;
 }
 
 .gs-qr-canvas {
   width: 200px;
   height: 200px;
-  border: 1px solid #EDF2F7;
-  border-radius: 12px;
-  padding: 12px;
   background: #FFFFFF;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  display: block;
 }
 
 .gs-qr-instruction {
   font-size: 13px;
-  color: #718096;
+  color: rgba(26, 26, 26, 0.5);
   text-align: center;
   line-height: 1.6;
 }
 
 .gs-qr-instruction strong {
-  color: #6C5CE7;
+  color: #0088FF;
   font-weight: 600;
 }
 
@@ -405,7 +406,7 @@ var GENSHOT_OVERLAY_CSS = `
 
 .gs-error-message {
   font-size: 13px;
-  color: #E53E3E;
+  color: #DC5A5A;
   max-width: 280px;
   line-height: 1.5;
 }

@@ -188,16 +188,39 @@ def update_generation(gen_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
 
 def get_generations_for_user(uid: str) -> List[Dict[str, Any]]:
     """Return all generations for a user, newest first."""
-    docs = (
-        _db()
-        .collection("generations")
-        .where("user_id", "==", uid)
-        .order_by("created_at", direction=gc_firestore.Query.DESCENDING)
-        .stream()
-    )
-    results: List[Dict[str, Any]] = []
-    for doc in docs:
-        item = doc.to_dict()
-        item["id"] = doc.id
-        results.append(item)
-    return results
+    try:
+        docs = (
+            _db()
+            .collection("generations")
+            .where("user_id", "==", uid)
+            .order_by("created_at", direction=gc_firestore.Query.DESCENDING)
+            .stream()
+        )
+        results: List[Dict[str, Any]] = []
+        for doc in docs:
+            item = doc.to_dict()
+            item["id"] = doc.id
+            results.append(item)
+        return results
+    except Exception as exc:
+        # Composite index may not exist yet — fall back to unordered query
+        import logging
+        logging.getLogger(__name__).warning(
+            "Ordered generations query failed (index may be missing): %s. "
+            "Falling back to unordered query.",
+            exc,
+        )
+        docs = (
+            _db()
+            .collection("generations")
+            .where("user_id", "==", uid)
+            .stream()
+        )
+        results: List[Dict[str, Any]] = []
+        for doc in docs:
+            item = doc.to_dict()
+            item["id"] = doc.id
+            results.append(item)
+        # Sort in Python as fallback
+        results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return results
