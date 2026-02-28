@@ -98,11 +98,11 @@ def _build_reve_prompt(
     )
     base_prompt = (
         "<img>0</img> Generate a photorealistic full-body studio portrait of this exact person. "
-        "They are wearing a plain white fitted crew-neck t-shirt and light grey fitted trousers. "
+        "They are wearing a plain white fitted crew-neck t-shirt and plain white fitted trousers. "
         "Full body shot, front-facing, arms slightly away from body. "
         "Clean solid neutral grey studio background. Soft even studio lighting. "
         "CRITICAL: preserve face, hairstyle, skin tone, body shape exactly. "
-        "The person has a warm, confident, natural smile with a relaxed pleasant expression. "
+        "The person has a neutral, relaxed facial expression with closed mouth. "
         "High resolution, editorial fashion photography quality."
     )
     if measurement_hint:
@@ -130,14 +130,14 @@ def _build_gemini_prompt(
         "\n\n"
         "REQUIREMENTS:\n"
         "- The person must wear a plain white fitted crew-neck t-shirt and "
-        "simple neutral-toned fitted trousers (light grey or beige).\n"
+        "plain white fitted trousers.\n"
         "- Full body shot from head to mid-shin, front-facing, arms slightly "
         "away from the body so the silhouette is clear.\n"
         "- Clean, solid neutral grey studio background (#E0E0E0).\n"
         "- Soft, even studio lighting — no harsh shadows.\n"
         "- CRITICAL: preserve the person's face, hairstyle, skin tone, body shape, "
         "and proportions EXACTLY as in the reference photo.\n"
-        "- The person has a warm, confident, natural smile with a relaxed pleasant expression.\n"
+        "- The person has a neutral, relaxed expression with closed mouth (no smile).\n"
         "- Natural relaxed pose, looking straight at the camera.\n"
         "- High resolution, editorial quality.\n"
         "- Output only the image, no text or overlays."

@@ -6,7 +6,7 @@ import base64
 import io
 import logging
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,8 @@ def resize_image(image_bytes: bytes, max_size: int = 1024) -> bytes:
     size limit it is re-encoded but not scaled.
     """
     img = Image.open(io.BytesIO(image_bytes))
+    # Apply EXIF orientation so portrait photos keep their intended rotation.
+    img = ImageOps.exif_transpose(img)
 
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")

@@ -175,7 +175,8 @@
     }
 
     try {
-      const errorCorrection = QRCode.ErrorCorrectLevel.M;
+      // Screen-to-screen scanning works best with larger modules.
+      const errorCorrection = QRCode.ErrorCorrectLevel.L;
       const qr = new QRCode(0, errorCorrection);
       qr.addData(url);
       qr.make();
@@ -185,8 +186,8 @@
       const ctx = canvas.getContext("2d");
       const quietZoneModules = 4;
       const totalModules = moduleCount + quietZoneModules * 2;
-      const targetSize = 320;
-      const modulePixelSize = Math.max(5, Math.floor(targetSize / totalModules));
+      const targetSize = 340;
+      const modulePixelSize = Math.max(6, Math.floor(targetSize / totalModules));
       const qrSize = totalModules * modulePixelSize;
       const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
@@ -220,29 +221,28 @@
     }
   }
 
+  function normalizeQrValue(value) {
+    if (value == null) return "";
+    return String(value).trim();
+  }
+
+  function buildScannerPayload(sid) {
+    if (!sid) return "";
+    // Compact app-scanner token (shorter than deep links, lower QR density).
+    return `GS2:${sid}`;
+  }
+
   function resolveQrPayload(data) {
-    const sid = data?.sessionId || data?.session_id || data?.sid;
-    const sig = data?.signature || data?.sig || "";
-    const compactPayload = data?.qr_payload || data?.qrPayload;
-    const legacyPayload = data?.qr_payload_legacy || data?.qrPayloadLegacy;
+    const sid = normalizeQrValue(data?.sessionId || data?.session_id || data?.sid);
+    const compactPayload = normalizeQrValue(data?.qr_payload || data?.qrPayload);
+    const legacyPayload = normalizeQrValue(data?.qr_payload_legacy || data?.qrPayloadLegacy);
 
-    if (typeof compactPayload === "string" && compactPayload.startsWith("genshot-fit://import")) {
-      return compactPayload;
-    }
+    if (sid) return buildScannerPayload(sid);
 
-    if (sid) {
-      return `genshot-fit://import?sid=${encodeURIComponent(sid)}&v=2`;
-    }
+    if (compactPayload) return compactPayload;
+    if (legacyPayload) return legacyPayload;
 
-    if (typeof legacyPayload === "string" && legacyPayload.startsWith("genshot-fit://import")) {
-      return legacyPayload;
-    }
-
-    if (sid && sig) {
-      return `genshot-fit://import?sid=${encodeURIComponent(sid)}&sig=${encodeURIComponent(sig)}`;
-    }
-
-    return "";
+    return sid;
   }
 
   // =========================================================================
