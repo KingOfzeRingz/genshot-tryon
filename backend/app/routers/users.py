@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Dict
@@ -12,6 +13,7 @@ from app.auth.dependencies import get_current_user
 from app.config import get_settings
 from app.models.user import UserProfile, UserProfileUpdate
 from app.services import firestore as db
+from app.services.core_image import generate_core_image
 from app.services.storage import upload_image
 from app.utils.image_processing import resize_image
 
@@ -131,3 +133,95 @@ async def upload_reference_photo(
     logger.info("Reference photo uploaded for user %s: %s", user_id, public_url)
 
     return UserProfile(**updated)
+
+
+async def _run_core_image_generation(user_id: str, reference_photo_url: str) -> None:
+    """Background task: generate core image and update user profile."""
+    try:
+        db.create_or_update_user(user_id, {"core_image_status": "processing"})
+        core_url = await generate_core_image(user_id, reference_photo_url)
+        if core_url:
+            db.create_or_update_user(user_id, {
+                "core_image_url": core_url,
+                "core_image_status": "completed",
+            })
+            logger.info("Core image completed for user %s", user_id)
+        else:
+            db.create_or_update_user(user_id, {"core_image_status": "failed"})
+            logger.warning("Core image generation failed for user %s", user_id)
+    except Exception as exc:
+        logger.error("Core image background task failed for %s: %s", user_id, exc)
+        try:
+            db.create_or_update_user(user_id, {"core_image_status": "failed"})
+        except Exception:
+            pass
+
+
+@router.post(
+    "/me/core-image",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate core reference image",
+)
+async def generate_core(
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Generate a studio-quality core reference image.
+
+    The user's raw reference photo is transformed into a clean studio shot
+    (plain white clothing, neutral background) that serves as the base for
+    all virtual try-on generations.
+
+    Returns immediately with ``status=processing``.  Poll ``GET /me`` to
+    check ``core_image_status`` and ``core_image_url``.
+    """
+    user_data = db.get_user(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    ref_url = user_data.get("reference_photo_url")
+    if not ref_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload a reference photo first (POST /v1/users/me/reference-photo).",
+        )
+
+    # Mark as pending and launch background task
+    db.create_or_update_user(user_id, {
+        "core_image_status": "pending",
+        "core_image_url": None,
+    })
+    asyncio.create_task(_run_core_image_generation(user_id, ref_url))
+
+    return {"status": "processing", "message": "Core image generation started."}
+
+
+@router.post(
+    "/me/core-image/regenerate",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Regenerate core reference image",
+)
+async def regenerate_core(
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Regenerate the core reference image (e.g. after uploading a new photo).
+
+    Same as the initial generation endpoint but clears any existing core image.
+    """
+    user_data = db.get_user(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    ref_url = user_data.get("reference_photo_url")
+    if not ref_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload a reference photo first.",
+        )
+
+    db.create_or_update_user(user_id, {
+        "core_image_status": "pending",
+        "core_image_url": None,
+    })
+    asyncio.create_task(_run_core_image_generation(user_id, ref_url))
+
+    return {"status": "processing", "message": "Core image regeneration started."}

@@ -192,7 +192,7 @@ def get_generations_for_user(uid: str) -> List[Dict[str, Any]]:
         _db()
         .collection("generations")
         .where("user_id", "==", uid)
-        .order_by("created_at", direction=fb_firestore.firestore.Query.DESCENDING)
+        .order_by("created_at", direction=gc_firestore.Query.DESCENDING)
         .stream()
     )
     results: List[Dict[str, Any]] = []

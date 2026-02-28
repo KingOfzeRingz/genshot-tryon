@@ -60,10 +60,15 @@ async def run_generation(generation_id: str) -> None:
             height_cm=user_data.get("height_cm"),
             weight_kg=user_data.get("weight_kg"),
             reference_photo_url=user_data.get("reference_photo_url", reference_photo_url),
+            core_image_url=user_data.get("core_image_url"),
         )
 
-        # Ensure we have a reference photo
-        if not user_profile.reference_photo_url:
+        # Prefer the core image (studio shot in white clothes) for try-on
+        # generation; fall back to raw reference photo if core isn't ready.
+        if user_profile.core_image_url:
+            user_profile.reference_photo_url = user_profile.core_image_url
+            logger.info("Using core image for generation %s", generation_id)
+        elif not user_profile.reference_photo_url:
             user_profile.reference_photo_url = reference_photo_url
         if not user_profile.reference_photo_url:
             raise ValueError("No reference photo available for user.")

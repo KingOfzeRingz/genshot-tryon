@@ -1,8 +1,11 @@
 """Virtual try-on image generation orchestrator.
 
-Attempts to use Vertex AI Imagen for the primary front-facing try-on image
-and falls back to Gemini image generation when Imagen is unavailable.
-A second, 45-degree angle image is always generated via Gemini.
+Uses Gemini models via Vertex AI with native image generation capabilities:
+  - Primary:  gemini-3.1-pro-preview  (best quality)
+  - Backup:   gemini-3-pro-preview
+  - Fallback: Vertex AI Imagen 3 (front view only)
+
+Each model is tried in order; the first successful result is used.
 """
 
 from __future__ import annotations
@@ -12,40 +15,56 @@ import logging
 import uuid
 from typing import List, Optional
 
-import google.generativeai as genai
-from google.cloud import storage as gcs
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
+from PIL import Image as PILImage
 
 from app.config import get_settings
 from app.models.body import BodyVector
 from app.models.item import Item
 from app.models.user import UserProfile
 from app.services.storage import upload_image
-from app.utils.image_processing import image_to_base64, resize_image
+from app.utils.image_processing import resize_image
 
 logger = logging.getLogger(__name__)
 
-_GEMINI_MODEL = "gemini-2.0-flash-exp"
+# Ordered by preference — first working model wins.
+_GEMINI_MODELS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+]
+
+_vertexai_initialized = False
 
 
-def _configure_genai() -> None:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_vertexai() -> None:
+    """Initialise the Vertex AI SDK once."""
+    global _vertexai_initialized
+    if _vertexai_initialized:
+        return
     settings = get_settings()
-    try:
-        genai.configure(project=settings.GCP_PROJECT_ID)
-    except Exception:
-        logger.debug("genai.configure() fell through -- using ADC.")
+    vertexai.init(
+        project=settings.GCP_PROJECT_ID,
+        location=settings.VERTEX_LOCATION,
+    )
+    _vertexai_initialized = True
+    logger.info("Vertex AI initialised (project=%s, location=%s)",
+                settings.GCP_PROJECT_ID, settings.VERTEX_LOCATION)
 
 
 def _download_reference_photo(url: str) -> bytes:
-    """Download the user's reference photo from GCS (public URL) or signed URL."""
+    """Download the user's reference photo from a public / signed URL."""
     import httpx
-
     resp = httpx.get(url, timeout=30.0, follow_redirects=True)
     resp.raise_for_status()
     return resp.content
 
 
 def _build_garment_description(items: List[Item]) -> str:
-    """Create a natural-language description of the garments for the prompt."""
     parts: List[str] = []
     for item in items:
         desc = item.name
@@ -60,7 +79,6 @@ def _build_garment_description(items: List[Item]) -> str:
 
 
 def _build_body_description(body: BodyVector) -> str:
-    """Summarise the body proportions for the image generation prompt."""
     lines: List[str] = []
     if body.chest_cm:
         lines.append(f"chest {body.chest_cm} cm")
@@ -79,25 +97,90 @@ def _build_body_description(body: BodyVector) -> str:
     return ", ".join(lines) if lines else "average build"
 
 
+# ---------------------------------------------------------------------------
+# Gemini native image generation via Vertex AI
+# ---------------------------------------------------------------------------
+
+def _generate_with_gemini(
+    reference_bytes: bytes,
+    garment_description: str,
+    body_description: str,
+    angle: str = "front-facing",
+    model_name: Optional[str] = None,
+) -> Optional[bytes]:
+    """Generate a try-on image via Gemini native image generation.
+
+    Tries each model in ``_GEMINI_MODELS`` until one succeeds, or uses
+    the specific *model_name* if provided.
+
+    Returns PNG bytes or ``None`` on failure.
+    """
+    _ensure_vertexai()
+
+    prompt = (
+        "You are a virtual try-on system. Generate a single photorealistic image "
+        "of the person in the reference photo wearing the following clothing: "
+        f"{garment_description}. "
+        f"Body proportions: {body_description}. "
+        f"Camera angle: {angle} view. "
+        "CRITICAL: preserve the person's face, hairstyle, skin tone, and body shape "
+        "exactly as in the reference photo. "
+        "Natural studio lighting, clean neutral background. "
+        "High-quality editorial fashion photography style. "
+        "Output only the image, no text."
+    )
+
+    # Build the image part from raw bytes
+    image_part = Part.from_data(data=reference_bytes, mime_type="image/png")
+
+    models_to_try = [model_name] if model_name else _GEMINI_MODELS
+
+    for mname in models_to_try:
+        try:
+            logger.info("Attempting image generation with %s (%s)", mname, angle)
+            model = GenerativeModel(mname)
+            response = model.generate_content(
+                [image_part, prompt],
+                generation_config=GenerationConfig(
+                    temperature=0.4,
+                    max_output_tokens=8192,
+                    response_mime_type="image/png",
+                ),
+            )
+
+            # Extract inline image from response parts
+            if response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data and part.inline_data.data:
+                        data = part.inline_data.data
+                        if isinstance(data, str):
+                            import base64
+                            data = base64.b64decode(data)
+                        logger.info("Got image from %s (%s): %d bytes", mname, angle, len(data))
+                        return data
+
+            logger.warning("%s returned no inline image for %s angle.", mname, angle)
+
+        except Exception as exc:
+            logger.warning("Image generation with %s failed (%s): %s", mname, angle, exc)
+            continue
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Vertex AI Imagen fallback
+# ---------------------------------------------------------------------------
+
 def _try_vertex_imagen(
     reference_bytes: bytes,
     garment_description: str,
     body_description: str,
 ) -> Optional[bytes]:
-    """Attempt Vertex AI Imagen virtual try-on.
-
-    Returns generated image bytes or None if Imagen is unavailable.
-    """
+    """Fallback: Vertex AI Imagen 3 for front-facing try-on."""
     try:
-        from google.cloud import aiplatform
+        _ensure_vertexai()
 
-        settings = get_settings()
-        aiplatform.init(
-            project=settings.GCP_PROJECT_ID,
-            location=settings.VERTEX_LOCATION,
-        )
-
-        # Vertex AI Imagen edit / virtual-try-on endpoint
         from vertexai.preview.vision_models import ImageGenerationModel
 
         model = ImageGenerationModel.from_pretrained("imagen-3.0-generate-001")
@@ -107,10 +190,7 @@ def _try_vertex_imagen(
             "Photorealistic result, natural lighting, front-facing view. "
             "Keep the person's face, hairstyle, and skin tone exactly the same."
         )
-        response = model.generate_images(
-            prompt=prompt,
-            number_of_images=1,
-        )
+        response = model.generate_images(prompt=prompt, number_of_images=1)
 
         if response.images:
             img = response.images[0]
@@ -121,60 +201,16 @@ def _try_vertex_imagen(
         logger.warning("Imagen returned no images.")
         return None
     except ImportError:
-        logger.info("vertexai package not available for Imagen try-on.")
+        logger.info("vertexai vision_models not available for Imagen.")
         return None
     except Exception as exc:
-        logger.warning("Vertex Imagen try-on failed: %s", exc)
+        logger.warning("Vertex Imagen failed: %s", exc)
         return None
 
 
-def _generate_with_gemini(
-    reference_b64: str,
-    garment_description: str,
-    body_description: str,
-    angle: str = "front-facing",
-) -> Optional[bytes]:
-    """Generate a try-on image via Gemini multimodal generation.
-
-    Returns PNG bytes or None on failure.
-    """
-    _configure_genai()
-
-    prompt = (
-        f"Generate a photorealistic virtual try-on image. "
-        f"The person in the reference photo should be shown wearing: {garment_description}. "
-        f"Body proportions: {body_description}. "
-        f"Camera angle: {angle} view. "
-        f"Keep the person's face, hairstyle, skin tone, and body shape exactly the same as in the reference. "
-        f"Natural studio lighting, clean background. High quality fashion photography style."
-    )
-
-    try:
-        model = genai.GenerativeModel(_GEMINI_MODEL)
-        response = model.generate_content(
-            [
-                {"mime_type": "image/png", "data": reference_b64},
-                prompt,
-            ],
-            generation_config=genai.GenerationConfig(
-                temperature=0.4,
-                max_output_tokens=8192,
-            ),
-        )
-
-        # Gemini image generation returns inline images in parts
-        for part in response.parts:
-            if hasattr(part, "inline_data") and part.inline_data:
-                return part.inline_data.data
-
-        # If no inline image, the model may have returned only text
-        logger.warning("Gemini did not return an inline image for %s angle.", angle)
-        return None
-
-    except Exception as exc:
-        logger.error("Gemini image generation failed (%s angle): %s", angle, exc)
-        return None
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 async def generate_tryon_images(
     user: UserProfile,
@@ -183,8 +219,13 @@ async def generate_tryon_images(
 ) -> List[str]:
     """Generate virtual try-on images and upload them to GCS.
 
-    Returns a list of public image URLs.  Partial results are returned
-    when some generations fail.
+    Pipeline:
+      1. Front-facing image  — Gemini 3.1 Pro → Gemini 3 Pro → Imagen
+      2. 45-degree image     — Gemini 3.1 Pro → Gemini 3 Pro
+      3. Close-up detail     — Gemini 3.1 Pro → Gemini 3 Pro
+
+    Returns a list of public GCS URLs.  Partial results are returned
+    when some views fail.
     """
     settings = get_settings()
     garment_desc = _build_garment_description(items)
@@ -202,14 +243,14 @@ async def generate_tryon_images(
         logger.error("Failed to fetch reference photo: %s", exc)
         return []
 
-    ref_b64 = image_to_base64(ref_bytes)
     urls: List[str] = []
     gen_id = uuid.uuid4().hex[:12]
 
     # ── Front-facing image ────────────────────────────────────────────
-    front_bytes = _try_vertex_imagen(ref_bytes, garment_desc, body_desc)
+    front_bytes = _generate_with_gemini(ref_bytes, garment_desc, body_desc, angle="front-facing")
     if front_bytes is None:
-        front_bytes = _generate_with_gemini(ref_b64, garment_desc, body_desc, angle="front-facing")
+        # Fallback to Vertex AI Imagen
+        front_bytes = _try_vertex_imagen(ref_bytes, garment_desc, body_desc)
 
     if front_bytes:
         path = f"generations/{user.uid}/{gen_id}_front.png"
@@ -219,9 +260,9 @@ async def generate_tryon_images(
     else:
         logger.warning("Front-facing image generation failed entirely.")
 
-    # ── 45-degree angle image (always Gemini) ─────────────────────────
+    # ── 45-degree angle image ─────────────────────────────────────────
     side_bytes = _generate_with_gemini(
-        ref_b64, garment_desc, body_desc, angle="45-degree three-quarter"
+        ref_bytes, garment_desc, body_desc, angle="45-degree three-quarter"
     )
     if side_bytes:
         path = f"generations/{user.uid}/{gen_id}_side.png"
@@ -230,5 +271,18 @@ async def generate_tryon_images(
         logger.info("Uploaded 45-degree try-on image: %s", url)
     else:
         logger.warning("45-degree image generation failed.")
+
+    # ── Close-up detail image ─────────────────────────────────────────
+    detail_bytes = _generate_with_gemini(
+        ref_bytes, garment_desc, body_desc,
+        angle="close-up torso detail showing fabric texture and fit"
+    )
+    if detail_bytes:
+        path = f"generations/{user.uid}/{gen_id}_detail.png"
+        url = upload_image(settings.GCS_BUCKET, path, detail_bytes, "image/png")
+        urls.append(url)
+        logger.info("Uploaded detail try-on image: %s", url)
+    else:
+        logger.warning("Detail image generation failed.")
 
     return urls

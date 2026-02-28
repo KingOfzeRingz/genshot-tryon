@@ -21,6 +21,8 @@ class UserProfile(BaseModel):
     weight_kg: Optional[float] = Field(None, gt=0, le=500)
     body_vector: Optional[BodyVector] = None
     reference_photo_url: Optional[str] = None
+    core_image_url: Optional[str] = None
+    core_image_status: Optional[str] = None  # pending, processing, completed, failed
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
