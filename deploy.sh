@@ -20,10 +20,11 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────
-GCP_PROJECT_ID="${GCP_PROJECT_ID:-genshot-tryon}"
-GCP_REGION="${GCP_REGION:-us-central1}"
+GCP_PROJECT_ID="${GCP_PROJECT_ID:-genshot-studio}"
+GCP_REGION="${GCP_REGION:-europe-west1}"
 SERVICE_NAME="${SERVICE_NAME:-genshot-tryon-api}"
-GCS_BUCKET="${GCS_BUCKET:-${GCP_PROJECT_ID}-assets}"
+GCS_BUCKET="${GCS_BUCKET:-genshot-tryon-mobile}"
+FIRESTORE_DATABASE="${FIRESTORE_DATABASE:-genshot-tryon-mobile}"
 IMAGE="gcr.io/${GCP_PROJECT_ID}/${SERVICE_NAME}"
 HMAC_SECRET="${HMAC_SECRET:-$(openssl rand -hex 16)}"
 
@@ -138,10 +139,11 @@ do_deploy() {
         --set-env-vars "\
 GCP_PROJECT_ID=${GCP_PROJECT_ID},\
 GCS_BUCKET=${GCS_BUCKET},\
+FIRESTORE_DATABASE=${FIRESTORE_DATABASE},\
 HMAC_SECRET=${HMAC_SECRET},\
 CORS_ORIGINS=[\"*\"],\
 LOG_LEVEL=INFO,\
-VERTEX_LOCATION=${GCP_REGION}" \
+VERTEX_LOCATION=us-central1" \
         --quiet
 
     # Get the service URL
@@ -179,9 +181,11 @@ do_local() {
         -p 8080:8080 \
         -e GCP_PROJECT_ID="${GCP_PROJECT_ID}" \
         -e GCS_BUCKET="${GCS_BUCKET}" \
+        -e FIRESTORE_DATABASE="${FIRESTORE_DATABASE}" \
         -e HMAC_SECRET="${HMAC_SECRET}" \
         -e CORS_ORIGINS='["*"]' \
         -e LOG_LEVEL=DEBUG \
+        -e VERTEX_LOCATION=us-central1 \
         -v "${BACKEND_DIR}/firebase-credentials.json:/app/firebase-credentials.json:ro" \
         -e FIREBASE_CREDENTIALS_PATH=/app/firebase-credentials.json \
         genshot-tryon-api

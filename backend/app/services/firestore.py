@@ -1,7 +1,8 @@
 """Firestore CRUD helpers.
 
-All functions operate on the default Firestore client initialised by
-``firebase_admin``.  Collections used:
+All functions operate on a Firestore client initialised by
+``firebase_admin``.  Supports named databases via the
+``FIRESTORE_DATABASE`` setting.  Collections used:
 
 - ``users``            -- user profiles
 - ``users/{uid}/items`` -- per-user wardrobe items (sub-collection)
@@ -15,15 +16,37 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from firebase_admin import firestore as fb_firestore
+import firebase_admin
+from google.cloud import firestore as gc_firestore
 from google.cloud.firestore_v1 import DocumentReference, DocumentSnapshot
+
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+_firestore_client = None
+
 
 def _db():
-    """Return the default Firestore client."""
-    return fb_firestore.client()
+    """Return the Firestore client, using a named database if configured."""
+    global _firestore_client
+    if _firestore_client is not None:
+        return _firestore_client
+
+    settings = get_settings()
+    db_id = settings.FIRESTORE_DATABASE
+
+    # Use the named database via the google-cloud-firestore Client directly
+    # so we can pass the `database` parameter.
+    app = firebase_admin.get_app()
+    credentials = app.credential.get_credential()
+    _firestore_client = gc_firestore.Client(
+        project=settings.GCP_PROJECT_ID,
+        credentials=credentials,
+        database=db_id,
+    )
+    logger.info("Firestore client initialised (project=%s, database=%s)", settings.GCP_PROJECT_ID, db_id)
+    return _firestore_client
 
 
 # ── Users ─────────────────────────────────────────────────────────────

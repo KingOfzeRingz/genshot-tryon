@@ -11,7 +11,8 @@
   "host_permissions": [
     "https://www.zara.com/*",
     "https://www2.hm.com/*",
-    "https://*.hm.com/*"
+    "https://*.hm.com/*",
+    "https://genshot-tryon-api-wmtx5he3ga-ew.a.run.app/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js"

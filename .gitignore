@@ -20,3 +20,7 @@ node_modules/
 # Environment
 .env
 .env.local
+
+# Firebase credentials (secrets - do not commit)
+**/GoogleService-Info.plist
+/backend/firebase-credentials.json

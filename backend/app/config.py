@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     )
 
     # --- Google Cloud --------------------------------------------------
-    GCP_PROJECT_ID: str = "genshot-tryon"
-    GCS_BUCKET: str = "genshot-tryon-assets"
+    GCP_PROJECT_ID: str = "genshot-studio"
+    GCS_BUCKET: str = "genshot-tryon-mobile"
+    FIRESTORE_DATABASE: str = "genshot-tryon-mobile"
     FIREBASE_CREDENTIALS_PATH: str = ""
     VERTEX_LOCATION: str = "us-central1"
 

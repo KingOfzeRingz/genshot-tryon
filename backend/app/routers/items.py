@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.auth.dependencies import get_current_user
 from app.models.item import Item
@@ -65,12 +65,13 @@ async def create_item(
 @router.delete(
     "/{item_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
     summary="Remove an item",
 )
 async def delete_item(
     item_id: str,
     user_id: str = Depends(get_current_user),
-) -> None:
+):
     """Delete an item from the user's wardrobe."""
     removed = db.remove_item(user_id, item_id)
     if not removed:

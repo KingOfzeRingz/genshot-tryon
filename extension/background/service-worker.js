@@ -5,7 +5,7 @@
  * All network requests to the backend are routed through this service worker.
  */
 
-const DEFAULT_API_BASE = "http://localhost:8080";
+const DEFAULT_API_BASE = "https://genshot-tryon-api-wmtx5he3ga-ew.a.run.app";
 
 /**
  * Retrieve the API base URL from storage, falling back to the default.
