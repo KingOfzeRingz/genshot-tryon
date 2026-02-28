@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import firebase_admin
 from google.cloud import firestore as gc_firestore
 from google.cloud.firestore_v1 import DocumentReference, DocumentSnapshot
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.config import get_settings
 
@@ -192,7 +193,7 @@ def get_generations_for_user(uid: str) -> List[Dict[str, Any]]:
         docs = (
             _db()
             .collection("generations")
-            .where("user_id", "==", uid)
+            .where(filter=FieldFilter("user_id", "==", uid))
             .order_by("created_at", direction=gc_firestore.Query.DESCENDING)
             .stream()
         )
@@ -213,7 +214,7 @@ def get_generations_for_user(uid: str) -> List[Dict[str, Any]]:
         docs = (
             _db()
             .collection("generations")
-            .where("user_id", "==", uid)
+            .where(filter=FieldFilter("user_id", "==", uid))
             .stream()
         )
         results: List[Dict[str, Any]] = []

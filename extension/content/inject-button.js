@@ -184,7 +184,9 @@
     '  <div class="gs-state gs-state-qr">',
     '    <div class="gs-qr-section">',
     '      <div class="gs-qr-badge">\u2713 Session created</div>',
-    '      <canvas class="gs-qr-canvas" width="400" height="400"></canvas>',
+    '      <div class="gs-qr-frame">',
+    '        <canvas class="gs-qr-canvas" width="400" height="400"></canvas>',
+    '      </div>',
     '      <div class="gs-qr-instruction">',
     '        Scan with the <strong>GenShot</strong> app to try on this item',
     '      </div>',
@@ -230,7 +232,32 @@
   // State helpers
   // =========================================================================
 
+  var ImportStates = {
+    idle: "idle",
+    extracting: "extracting",
+    importing: "importing",
+    qr: "qr",
+    error: "error",
+  };
+
   var currentProduct = null;
+  var importState = ImportStates.extracting;
+
+  function hasValidProduct() {
+    if (!currentProduct) return false;
+    var hasName = typeof currentProduct.name === "string" && currentProduct.name.trim().length > 0;
+    var hasImages = Array.isArray(currentProduct.images) && currentProduct.images.length > 0;
+    return hasName || hasImages;
+  }
+
+  function syncImportButtonState() {
+    btnImport.disabled = !(importState === ImportStates.idle && hasValidProduct());
+  }
+
+  function setImportState(nextState) {
+    importState = nextState;
+    syncImportButtonState();
+  }
 
   function showState(name) {
     Object.keys(stateEls).forEach(function (k) {
@@ -251,6 +278,7 @@
 
   function showError(msg) {
     errorMsg.textContent = msg || "Something went wrong. Please try again.";
+    setImportState(ImportStates.error);
     showState("error");
   }
 
@@ -260,7 +288,7 @@
 
   function displayProduct(product) {
     currentProduct = product;
-    btnImport.disabled = false;
+    setImportState(ImportStates.idle);
 
     if (product.images && product.images.length > 0) {
       productImg.src = product.images[0];
@@ -330,11 +358,38 @@
         }
       }
 
+      setImportState(ImportStates.qr);
       showState("qr");
     } catch (err) {
       console.error("[GenShot TryOn] QR render error:", err);
       showError("Failed to generate QR code: " + err.message);
     }
+  }
+
+  function resolveQrPayload(data) {
+    var sid = data && (data.sessionId || data.session_id || data.sid);
+    var sig = data && (data.signature || data.sig || "");
+    var compactPayload = data && (data.qr_payload || data.qrPayload);
+    var legacyPayload = data && (data.qr_payload_legacy || data.qrPayloadLegacy);
+
+    if (typeof compactPayload === "string" && compactPayload.indexOf("genshot-fit://import") === 0) {
+      return compactPayload;
+    }
+
+    if (sid) {
+      return "genshot-fit://import?sid=" + encodeURIComponent(sid) + "&v=2";
+    }
+
+    if (typeof legacyPayload === "string" && legacyPayload.indexOf("genshot-fit://import") === 0) {
+      return legacyPayload;
+    }
+
+    if (sid && sig) {
+      return "genshot-fit://import?sid=" + encodeURIComponent(sid) +
+        "&sig=" + encodeURIComponent(sig);
+    }
+
+    return "";
   }
 
   // =========================================================================
@@ -343,6 +398,7 @@
 
   function extractAndShow() {
     openModal();
+    setImportState(ImportStates.extracting);
     showState("extracting");
 
     // Small delay to let SPA content settle
@@ -382,10 +438,11 @@
 
   function createImportSession() {
     if (!currentProduct) {
-      btnImport.disabled = false;
+      setImportState(ImportStates.error);
       return;
     }
 
+    setImportState(ImportStates.importing);
     showState("creating");
 
     var item = {
@@ -410,28 +467,17 @@
           if (errText.indexOf("Failed to fetch") !== -1 || errText.indexOf("NetworkError") !== -1) {
             errText = "Cannot connect to GenShot server. Is the backend running?";
           }
-          btnImport.disabled = false;
           showError(errText);
           return;
         }
 
         var data = response.data;
-        var sid = data.sessionId || data.session_id || data.sid;
-        var sig = data.signature || data.sig || "";
-        var qrPayload = data.qr_payload || data.qrPayload;
-
-        if (!sid) {
-          btnImport.disabled = false;
+        var qrUrl = resolveQrPayload(data);
+        if (!qrUrl) {
           showError("Backend returned invalid session data");
           return;
         }
-
-        var qrUrl = typeof qrPayload === "string" && qrPayload.length > 0
-          ? qrPayload
-          : "genshot-fit://import?sid=" + encodeURIComponent(sid) +
-            "&sig=" + encodeURIComponent(sig);
         renderQrCode(qrUrl);
-        btnImport.disabled = false;
       }
     );
   }
@@ -450,16 +496,13 @@
 
   btnImport.addEventListener("click", function () {
     if (btnImport.disabled) return;
-    btnImport.disabled = true;
     try {
       if (!isContextValid()) {
-        btnImport.disabled = false;
         showError("Extension was reloaded. Please refresh the page and try again.");
         return;
       }
       createImportSession();
     } catch (err) {
-      btnImport.disabled = false;
       showError(
         err && typeof err.message === "string" && err.message.indexOf("Extension context invalidated") !== -1
           ? "Extension was reloaded. Please refresh the page and try again."
@@ -492,6 +535,7 @@
   }
 
   // Initial check
+  syncImportButtonState();
   updateFabVisibility();
 
   // =========================================================================

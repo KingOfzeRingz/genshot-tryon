@@ -52,6 +52,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
     )
 
+    try:
+        settings.validate_runtime()
+    except ValueError as exc:
+        logger.error("Invalid runtime configuration: %s", exc)
+        raise
+
+    settings.log_runtime_configuration()
+
     # Initialise Firebase
     _init_firebase()
 
@@ -74,7 +82,7 @@ def create_app() -> FastAPI:
     # ── CORS ──────────────────────────────────────────────────────────
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

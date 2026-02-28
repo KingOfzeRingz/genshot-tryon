@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.auth.dependencies import get_current_user
 from app.config import get_settings
+from app.models.body import BodyVector
 from app.models.user import UserProfile, UserProfileUpdate
 from app.services import firestore as db
 from app.services.core_image import generate_core_image
@@ -64,6 +65,14 @@ async def update_me(
     # If body_vector is present, serialise it properly
     if "body_vector" in update_data and update_data["body_vector"] is not None:
         update_data["body_vector"] = payload.body_vector.model_dump(exclude_none=True)
+
+    logger.info("Profile update request: user=%s, keys=%s", user_id, sorted(update_data.keys()))
+    if payload.body_vector is not None:
+        logger.info(
+            "Profile update body_vector metadata: user=%s, source=%s",
+            user_id,
+            payload.body_vector.source,
+        )
 
     updated = db.create_or_update_user(user_id, update_data)
     logger.info("Updated profile for user %s: keys=%s", user_id, list(update_data.keys()))
@@ -130,29 +139,66 @@ async def upload_reference_photo(
         ) from exc
 
     updated = db.create_or_update_user(user_id, {"reference_photo_url": public_url})
-    logger.info("Reference photo uploaded for user %s: %s", user_id, public_url)
+    logger.info(
+        "Reference photo uploaded and profile updated: user=%s, keys=%s, url=%s",
+        user_id,
+        ["reference_photo_url"],
+        public_url,
+    )
 
     return UserProfile(**updated)
 
 
-async def _run_core_image_generation(user_id: str, reference_photo_url: str) -> None:
+async def _run_core_image_generation(
+    user_id: str,
+    reference_photo_url: str,
+    body_vector_raw: dict | None,
+    height_cm: float | None,
+    weight_kg: float | None,
+    gender: str | None,
+) -> None:
     """Background task: generate core image and update user profile."""
     try:
         db.create_or_update_user(user_id, {"core_image_status": "processing"})
-        core_url = await generate_core_image(user_id, reference_photo_url)
+        logger.info("Core image status update: user=%s, keys=%s", user_id, ["core_image_status"])
+        body_vector: BodyVector | None = None
+        if isinstance(body_vector_raw, dict) and body_vector_raw:
+            try:
+                body_vector = BodyVector(**body_vector_raw)
+            except Exception as exc:
+                logger.warning(
+                    "Invalid body_vector for core image generation user=%s: %s",
+                    user_id,
+                    exc,
+                )
+        core_url = await generate_core_image(
+            user_id,
+            reference_photo_url,
+            body_vector=body_vector,
+            height_cm=height_cm,
+            weight_kg=weight_kg,
+            gender=gender,
+        )
         if core_url:
             db.create_or_update_user(user_id, {
                 "core_image_url": core_url,
                 "core_image_status": "completed",
             })
+            logger.info(
+                "Core image status update: user=%s, keys=%s",
+                user_id,
+                ["core_image_url", "core_image_status"],
+            )
             logger.info("Core image completed for user %s", user_id)
         else:
             db.create_or_update_user(user_id, {"core_image_status": "failed"})
+            logger.info("Core image status update: user=%s, keys=%s", user_id, ["core_image_status"])
             logger.warning("Core image generation failed for user %s", user_id)
     except Exception as exc:
         logger.error("Core image background task failed for %s: %s", user_id, exc)
         try:
             db.create_or_update_user(user_id, {"core_image_status": "failed"})
+            logger.info("Core image status update: user=%s, keys=%s", user_id, ["core_image_status"])
         except Exception:
             pass
 
@@ -190,7 +236,21 @@ async def generate_core(
         "core_image_status": "pending",
         "core_image_url": None,
     })
-    asyncio.create_task(_run_core_image_generation(user_id, ref_url))
+    logger.info(
+        "Core image status update: user=%s, keys=%s",
+        user_id,
+        ["core_image_status", "core_image_url"],
+    )
+    asyncio.create_task(
+        _run_core_image_generation(
+            user_id,
+            ref_url,
+            body_vector_raw=user_data.get("body_vector"),
+            height_cm=user_data.get("height_cm"),
+            weight_kg=user_data.get("weight_kg"),
+            gender=user_data.get("gender"),
+        )
+    )
 
     return {"status": "processing", "message": "Core image generation started."}
 
@@ -222,6 +282,20 @@ async def regenerate_core(
         "core_image_status": "pending",
         "core_image_url": None,
     })
-    asyncio.create_task(_run_core_image_generation(user_id, ref_url))
+    logger.info(
+        "Core image status update: user=%s, keys=%s",
+        user_id,
+        ["core_image_status", "core_image_url"],
+    )
+    asyncio.create_task(
+        _run_core_image_generation(
+            user_id,
+            ref_url,
+            body_vector_raw=user_data.get("body_vector"),
+            height_cm=user_data.get("height_cm"),
+            weight_kg=user_data.get("weight_kg"),
+            gender=user_data.get("gender"),
+        )
+    )
 
     return {"status": "processing", "message": "Core image regeneration started."}

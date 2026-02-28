@@ -19,6 +19,22 @@
 
 set -euo pipefail
 
+# ── Load backend/.env if present (keys not already in environment) ───
+SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "${SCRIPT_DIR_EARLY}/backend/.env" ]]; then
+    while IFS='=' read -r key value; do
+        # Skip comments and blank lines
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        # Strip surrounding quotes from value
+        value="${value%\"}"
+        value="${value#\"}"
+        # Only set if not already exported in the shell environment
+        if [[ -z "${!key+x}" ]]; then
+            export "$key=$value"
+        fi
+    done < "${SCRIPT_DIR_EARLY}/backend/.env"
+fi
+
 # ── Defaults ──────────────────────────────────────────────────────────
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-genshot-studio}"
 GCP_REGION="${GCP_REGION:-europe-west1}"
@@ -27,6 +43,23 @@ GCS_BUCKET="${GCS_BUCKET:-genshot-tryon-mobile}"
 FIRESTORE_DATABASE="${FIRESTORE_DATABASE:-genshot-tryon-mobile}"
 IMAGE="gcr.io/${GCP_PROJECT_ID}/${SERVICE_NAME}"
 HMAC_SECRET="${HMAC_SECRET:-$(openssl rand -hex 16)}"
+VERTEX_LOCATION="${VERTEX_LOCATION:-${GCP_REGION}}"
+VERTEX_IMAGE_LOCATION="${VERTEX_IMAGE_LOCATION:-global}"
+CORE_IMAGE_MODELS="${CORE_IMAGE_MODELS:-gemini-3-pro-image-preview}"
+TRYON_IMAGE_MODELS="${TRYON_IMAGE_MODELS:-}"
+
+# Normalise JSON-array values from .env into plain comma-separated strings
+# e.g. '["a","b"]' → 'a,b'
+_normalise_list() {
+    local v="$1"
+    v="${v#\[}"       # strip leading [
+    v="${v%\]}"       # strip trailing ]
+    v="${v//\"/}"     # strip all quotes
+    v="${v// /}"      # strip spaces
+    echo "$v"
+}
+CORE_IMAGE_MODELS="$(_normalise_list "$CORE_IMAGE_MODELS")"
+TRYON_IMAGE_MODELS="$(_normalise_list "$TRYON_IMAGE_MODELS")"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="${SCRIPT_DIR}/backend"
@@ -111,6 +144,7 @@ do_setup() {
 # ── Deploy ────────────────────────────────────────────────────────────
 do_deploy() {
     info "Deploying backend to Cloud Run..."
+    [[ -n "${TRYON_IMAGE_MODELS}" ]] || fail "TRYON_IMAGE_MODELS is required (comma-separated model IDs)."
 
     # Build with Cloud Build (no local Docker needed)
     info "Building container image with Cloud Build..."
@@ -136,14 +170,7 @@ do_deploy() {
         --min-instances 0 \
         --max-instances 3 \
         --timeout 300 \
-        --set-env-vars "\
-GCP_PROJECT_ID=${GCP_PROJECT_ID},\
-GCS_BUCKET=${GCS_BUCKET},\
-FIRESTORE_DATABASE=${FIRESTORE_DATABASE},\
-HMAC_SECRET=${HMAC_SECRET},\
-CORS_ORIGINS=[\"*\"],\
-LOG_LEVEL=INFO,\
-VERTEX_LOCATION=us-central1" \
+        --set-env-vars "^##^GCP_PROJECT_ID=${GCP_PROJECT_ID}##GCS_BUCKET=${GCS_BUCKET}##FIRESTORE_DATABASE=${FIRESTORE_DATABASE}##HMAC_SECRET=${HMAC_SECRET}##CORS_ORIGINS=[\"*\"]##LOG_LEVEL=INFO##VERTEX_LOCATION=${VERTEX_LOCATION}##VERTEX_IMAGE_LOCATION=${VERTEX_IMAGE_LOCATION}##CORE_IMAGE_MODELS=${CORE_IMAGE_MODELS}##TRYON_IMAGE_MODELS=${TRYON_IMAGE_MODELS}" \
         --quiet
 
     # Get the service URL
@@ -170,6 +197,7 @@ VERTEX_LOCATION=us-central1" \
 # ── Local run ─────────────────────────────────────────────────────────
 do_local() {
     info "Building and running backend locally with Docker..."
+    [[ -n "${TRYON_IMAGE_MODELS}" ]] || fail "TRYON_IMAGE_MODELS is required (comma-separated model IDs)."
     cd "${BACKEND_DIR}"
 
     docker build -t genshot-tryon-api .
@@ -185,7 +213,10 @@ do_local() {
         -e HMAC_SECRET="${HMAC_SECRET}" \
         -e CORS_ORIGINS='["*"]' \
         -e LOG_LEVEL=DEBUG \
-        -e VERTEX_LOCATION=us-central1 \
+        -e VERTEX_LOCATION="${VERTEX_LOCATION}" \
+        -e VERTEX_IMAGE_LOCATION="${VERTEX_IMAGE_LOCATION}" \
+        -e CORE_IMAGE_MODELS="${CORE_IMAGE_MODELS}" \
+        -e TRYON_IMAGE_MODELS="${TRYON_IMAGE_MODELS}" \
         -v "${BACKEND_DIR}/firebase-credentials.json:/app/firebase-credentials.json:ro" \
         -e FIREBASE_CREDENTIALS_PATH=/app/firebase-credentials.json \
         genshot-tryon-api

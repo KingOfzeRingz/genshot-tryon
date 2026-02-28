@@ -51,7 +51,32 @@
     stateError,
   ];
 
+  const ImportStates = Object.freeze({
+    idle: "idle",
+    extracting: "extracting",
+    importing: "importing",
+    qr: "qr",
+    error: "error",
+  });
+
   let currentProduct = null;
+  let importState = ImportStates.extracting;
+
+  function hasValidProduct() {
+    if (!currentProduct) return false;
+    const hasName = typeof currentProduct.name === "string" && currentProduct.name.trim().length > 0;
+    const hasImages = Array.isArray(currentProduct.images) && currentProduct.images.length > 0;
+    return hasName || hasImages;
+  }
+
+  function syncImportButtonState() {
+    btnImport.disabled = !(importState === ImportStates.idle && hasValidProduct());
+  }
+
+  function setImportState(nextState) {
+    importState = nextState;
+    syncImportButtonState();
+  }
 
   function showState(stateEl) {
     allStates.forEach((s) => s.classList.add("hidden"));
@@ -60,6 +85,7 @@
 
   function showError(msg) {
     errorMessage.textContent = msg || "Something went wrong. Please try again.";
+    setImportState(ImportStates.error);
     showState(stateError);
   }
 
@@ -97,7 +123,7 @@
 
   function displayProduct(product) {
     currentProduct = product;
-    btnImport.disabled = false;
+    setImportState(ImportStates.idle);
 
     // Image
     if (product.images && product.images.length > 0) {
@@ -187,10 +213,36 @@
       }
 
       showState(stateQr);
+      setImportState(ImportStates.qr);
     } catch (err) {
       console.error("[GenShot TryOn] QR render error:", err);
       showError("Failed to generate QR code: " + err.message);
     }
+  }
+
+  function resolveQrPayload(data) {
+    const sid = data?.sessionId || data?.session_id || data?.sid;
+    const sig = data?.signature || data?.sig || "";
+    const compactPayload = data?.qr_payload || data?.qrPayload;
+    const legacyPayload = data?.qr_payload_legacy || data?.qrPayloadLegacy;
+
+    if (typeof compactPayload === "string" && compactPayload.startsWith("genshot-fit://import")) {
+      return compactPayload;
+    }
+
+    if (sid) {
+      return `genshot-fit://import?sid=${encodeURIComponent(sid)}&v=2`;
+    }
+
+    if (typeof legacyPayload === "string" && legacyPayload.startsWith("genshot-fit://import")) {
+      return legacyPayload;
+    }
+
+    if (sid && sig) {
+      return `genshot-fit://import?sid=${encodeURIComponent(sid)}&sig=${encodeURIComponent(sig)}`;
+    }
+
+    return "";
   }
 
   // =========================================================================
@@ -198,6 +250,7 @@
   // =========================================================================
 
   async function extractProduct() {
+    setImportState(ImportStates.extracting);
     showState(stateLoading);
 
     try {
@@ -270,10 +323,11 @@
 
   async function createImportSession() {
     if (!currentProduct) {
-      btnImport.disabled = false;
+      setImportState(ImportStates.error);
       return;
     }
 
+    setImportState(ImportStates.importing);
     showState(stateImporting);
 
     try {
@@ -299,20 +353,11 @@
       });
 
       if (response?.success && response.data) {
-        const { sessionId, signature, sid, sig, session_id, qr_payload } = response.data;
-
-        // Support different backend response formats (camelCase and snake_case)
-        const finalSid = sessionId || session_id || sid;
-        const finalSig = signature || sig;
-
-        if (!finalSid) {
+        const qrUrl = resolveQrPayload(response.data);
+        if (!qrUrl) {
           showError("Backend returned invalid session data");
           return;
         }
-
-        const qrUrl = typeof qr_payload === "string" && qr_payload.length > 0
-          ? qr_payload
-          : `genshot-fit://import?sid=${encodeURIComponent(finalSid)}&sig=${encodeURIComponent(finalSig || "")}`;
         renderQrCode(qrUrl);
       } else {
         showError(response?.error || "Failed to create import session");
@@ -324,8 +369,6 @@
           ? "Cannot connect to the GenShot server. Make sure the backend is running."
           : err.message
       );
-    } finally {
-      btnImport.disabled = false;
     }
   }
 
@@ -335,7 +378,6 @@
 
   btnImport.addEventListener("click", () => {
     if (btnImport.disabled) return;
-    btnImport.disabled = true;
     createImportSession();
   });
 
@@ -347,5 +389,6 @@
   // Initialize
   // =========================================================================
 
+  syncImportButtonState();
   extractProduct();
 })();

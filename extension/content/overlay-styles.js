@@ -368,10 +368,20 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-qr-canvas {
-  width: 200px;
-  height: 200px;
-  background: #FFFFFF;
+  width: auto;
+  height: auto;
   display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  transform: none !important;
+  filter: none !important;
+}
+
+.gs-qr-frame {
+  background: #FFFFFF;
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid rgba(199, 199, 199, 0.35);
 }
 
 .gs-qr-instruction {

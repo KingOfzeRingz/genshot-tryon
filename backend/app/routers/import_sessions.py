@@ -16,7 +16,12 @@ from app.auth.dependencies import get_current_user
 from app.config import get_settings
 from app.models.item import ImportSession, ImportSessionClaim, ImportSessionCreate, Item
 from app.services import firestore as db
-from app.utils.qr import generate_qr_payload, sign_session, verify_signature
+from app.utils.qr import (
+    generate_qr_payload,
+    generate_qr_payload_legacy,
+    sign_session,
+    verify_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,7 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
     db.update_import_session(session_id, {"sig": sig})
 
     qr = generate_qr_payload(session_id, sig)
+    qr_legacy = generate_qr_payload_legacy(session_id, sig)
 
     logger.info("Created import session %s with %d items", session_id, len(items))
 
@@ -90,6 +96,7 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
         "session_id": session_id,
         "sig": sig,
         "qr_payload": qr,
+        "qr_payload_legacy": qr_legacy,
         "item_count": len(items),
     }
 
@@ -121,10 +128,19 @@ async def claim_import_session(
     if session.get("status") == "expired":
         raise HTTPException(status_code=410, detail="Session has expired.")
 
-    # Verify the signature from the QR code against the stored one
+    # Verify signature in dual mode:
+    # - legacy: incoming sig from QR
+    # - compact: no sig in QR, validate using stored signature
     stored_sig = session.get("sig", "")
+    mode = "legacy" if sig else "compact"
     incoming_sig = sig or stored_sig
-    if not verify_signature(session_id, incoming_sig, settings.HMAC_SECRET):
+    if not incoming_sig or not verify_signature(session_id, incoming_sig, settings.HMAC_SECRET):
+        logger.warning(
+            "Import session claim rejected: session=%s user=%s mode=%s reason=invalid_signature",
+            session_id,
+            user_id,
+            mode,
+        )
         raise HTTPException(status_code=403, detail="Invalid session signature.")
 
     # Copy items to user's wardrobe
@@ -142,7 +158,13 @@ async def claim_import_session(
         "claimed_at": datetime.now(timezone.utc).isoformat(),
     })
 
-    logger.info("User %s claimed session %s (%d items)", user_id, session_id, len(claimed_items))
+    logger.info(
+        "Import session claimed: session=%s user=%s mode=%s items=%d",
+        session_id,
+        user_id,
+        mode,
+        len(claimed_items),
+    )
 
     return {
         "session_id": session_id,
