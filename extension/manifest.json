@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "GenShot TryOn",
+  "description": "Virtual try-on for any clothing item",
+  "version": "1.0.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.zara.com/*",
+    "https://www2.hm.com/*",
+    "https://*.hm.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zara.com/*",
+        "https://www2.hm.com/*",
+        "https://*.hm.com/*"
+      ],
+      "js": [
+        "content/extractors/zara.js",
+        "content/extractors/hm.js",
+        "content/extractors/generic.js",
+        "content/image-selector.js",
+        "content/content-script.js",
+        "lib/qrcode.min.js",
+        "content/overlay-styles.js",
+        "content/inject-button.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon48.png"],
+      "matches": [
+        "https://www.zara.com/*",
+        "https://www2.hm.com/*",
+        "https://*.hm.com/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "GenShot TryOn - Virtual Try-On",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

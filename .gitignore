@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude
+.claude/
+
+# Xcode build artifacts
+TryOn/build/
+DerivedData/
+*.xcuserdata
+
+# Node (backend)
+node_modules/
+
+# Environment
+.env
+.env.local

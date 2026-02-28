@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+.git
+.idea
+.vscode
+*.egg-info
+dist
+build
+venv
+.venv
+*.md
