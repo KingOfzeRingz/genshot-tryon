@@ -122,7 +122,7 @@ async def run_generation(generation_id: str) -> None:
             {
                 "status": "completed",
                 "stage": "finalized",
-                "images": final_image_urls,
+                "images": image_bundle.get("final_images", []),
                 "internal_reference_images": image_bundle.get("internal_reference_images", []),
                 "final_images": image_bundle.get("final_images", []),
                 "generation_context": {
@@ -131,6 +131,8 @@ async def run_generation(generation_id: str) -> None:
                     "internal_reference_angles": ["front", "profile"],
                 },
                 "fit_scores": fit_scores,
+                "saved": True,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )

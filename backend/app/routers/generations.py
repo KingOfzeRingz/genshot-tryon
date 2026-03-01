@@ -109,6 +109,17 @@ async def create_generation(
 
     final_angles = _sanitize_angles(payload.angles)
 
+    saved_selection = [
+        {"slot": s, "item_id": sel.item_id, "size": sel.size}
+        for s, sel in [
+            ("top", payload.items.top),
+            ("bottom", payload.items.bottom),
+            ("outerwear", payload.items.outerwear),
+            ("shoes", payload.items.shoes),
+        ]
+        if sel is not None
+    ] if payload.items else []
+
     gen_data: Dict[str, Any] = {
         "user_id": user_id,
         "item_ids": found_items,
@@ -124,7 +135,7 @@ async def create_generation(
         "fit_scores": [],
         "error_message": None,
         "saved": False,
-        "saved_selection": [],
+        "saved_selection": saved_selection,
     }
 
     created = db.create_generation(gen_data)

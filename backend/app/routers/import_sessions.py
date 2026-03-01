@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import random
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from app.auth.dependencies import get_current_user
 from app.config import get_settings
 from app.models.item import ImportCodeClaim, ImportSession, ImportSessionClaim, ImportSessionCreate, Item
 from app.services import firestore as db
+from app.services.storage import upload_image
 from app.utils.qr import (
     generate_qr_payload,
     generate_qr_payload_legacy,
@@ -69,6 +71,108 @@ def _demo_name_for_category(category: str) -> str:
     }.get(category, "T-Shirt")
 
 
+def _cache_image_to_gcs(image_url: str, session_id: str, index: int) -> Optional[str]:
+    """Download an image and upload it to GCS. Returns GCS URL or None on failure."""
+    import httpx
+
+    if not image_url:
+        return None
+    try:
+        settings = get_settings()
+        resp = httpx.get(
+            image_url,
+            timeout=15.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+        )
+        resp.raise_for_status()
+        if not resp.content:
+            return None
+
+        content_type = resp.headers.get("content-type", "image/jpeg")
+        # Determine extension from content type
+        ext = "jpg"
+        if "png" in content_type:
+            ext = "png"
+        elif "webp" in content_type:
+            ext = "webp"
+
+        path = f"imports/{session_id}/{index}.{ext}"
+        gcs_url = upload_image(settings.GCS_BUCKET, path, resp.content, content_type)
+        logger.info("Cached image to GCS: %s -> %s", image_url[:80], path)
+        return gcs_url
+    except Exception as exc:
+        logger.warning("Failed to cache image to GCS: url=%s error=%s", image_url[:80], exc)
+        return None
+
+
+def _parse_measurement_value(text: str) -> Optional[float]:
+    """Extract a numeric cm value from a measurement string like '96 cm' or '96-100'."""
+    import re
+
+    if not isinstance(text, str):
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+
+    text = text.strip().lower().replace(",", ".")
+    # Range like "96-100" → take the midpoint
+    range_match = re.match(r"(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)", text)
+    if range_match:
+        lo, hi = float(range_match.group(1)), float(range_match.group(2))
+        return round((lo + hi) / 2, 1)
+    # Single value like "96 cm" or "96"
+    num_match = re.match(r"(\d+(?:\.\d+)?)", text)
+    if num_match:
+        return float(num_match.group(1))
+    return None
+
+
+def _parse_size_grid(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a size_grid from the extension's sizes / sizeChart fields."""
+    size_chart = raw.get("sizeChart") or []
+    sizes = raw.get("sizes") or []
+
+    grid: List[Dict[str, Any]] = []
+
+    if size_chart and isinstance(size_chart, list):
+        for entry in size_chart:
+            label = _as_string(entry.get("size"), "")
+            if not label:
+                continue
+            raw_measurements = entry.get("measurements", {})
+            measurements: Dict[str, float] = {}
+            if isinstance(raw_measurements, dict):
+                for key, val in raw_measurements.items():
+                    parsed = _parse_measurement_value(val)
+                    if parsed is not None:
+                        # Normalize key: "Chest" → "chest_cm", "Hip" → "hip_cm"
+                        norm_key = key.strip().lower().replace(" ", "_")
+                        if not norm_key.endswith("_cm"):
+                            norm_key += "_cm"
+                        measurements[norm_key] = parsed
+            grid.append({"size_label": label, "measurements": measurements})
+    elif sizes and isinstance(sizes, list):
+        # Extension only sent labels (no measurement data)
+        for entry in sizes:
+            if isinstance(entry, dict):
+                label = _as_string(entry.get("label"), "")
+                available = entry.get("available", True)
+            elif isinstance(entry, str):
+                label = entry.strip()
+                available = True
+            else:
+                continue
+            if label and available:
+                grid.append({"size_label": label, "measurements": {}})
+
+    return grid
+
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
@@ -84,8 +188,9 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
     # Convert raw dicts to Item objects (tolerant parsing).
     # The Chrome extension sends camelCase fields (e.g. productUrl, images)
     # while the backend models use snake_case.  Handle both.
+    batch_id = uuid.uuid4().hex[:12]
     items: List[Dict[str, Any]] = []
-    for raw in payload.items:
+    for idx, raw in enumerate(payload.items):
         # Resolve image_url: extension sends `images` (array), backend wants `image_url` (string)
         image_url = _as_string(raw.get("image_url"), "")
         if not image_url:
@@ -95,6 +200,12 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
                     (_as_string(candidate, "") for candidate in images if _as_string(candidate, "")),
                     "",
                 )
+
+        # Cache image to GCS to avoid 403s when fetching from retailer CDNs later
+        if image_url:
+            cached_url = _cache_image_to_gcs(image_url, batch_id, idx)
+            if cached_url:
+                image_url = cached_url
 
         # Resolve product_url: extension sends `productUrl` (camelCase)
         product_url = _as_string(raw.get("product_url"), "") or _as_string(raw.get("productUrl"), "")
@@ -109,6 +220,8 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
         category = _normalize_demo_category(source_category)
         normalized_name = _demo_name_for_category(category)
 
+        size_grid_data = _parse_size_grid(raw)
+
         item = Item(
             name=normalized_name,
             brand=_as_string(raw.get("brand"), ""),
@@ -119,7 +232,7 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
             currency=_as_string(raw.get("currency"), "USD"),
             color=_as_string(raw.get("color"), ""),
             material=_as_string(raw.get("material"), ""),
-            size_grid=[],  # will be enriched later via size chart parsing
+            size_grid=size_grid_data,
         )
         items.append(item.model_dump(mode="json"))
 

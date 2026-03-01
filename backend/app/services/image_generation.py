@@ -22,7 +22,7 @@ from app.models.body import BodyVector
 from app.models.item import Item
 from app.models.user import UserProfile
 from app.services.storage import upload_image
-from app.utils.image_processing import resize_image
+from app.utils.image_processing import crop_face, resize_image
 
 logger = logging.getLogger(__name__)
 
@@ -154,16 +154,28 @@ def _generate_with_gemini(
     angle_name: str,
     angle_instruction: str,
     stage: str,
+    has_face_crop: bool = False,
 ) -> Optional[bytes]:
     """Generate an image with Gemini image models.
 
     ``stage`` is either ``internal_reference`` or ``final_tryon``.
+    When *has_face_crop* is True the prompt tells the model that the first
+    reference image is a close-up face crop for identity anchoring.
     """
     client = _get_client()
     settings = get_settings()
 
+    face_anchor = (
+        "The first provided image is a close-up face and head-shoulders reference "
+        "of the person — use it as a strict anchor for facial identity, skin tone, "
+        "facial features, and hairstyle across every generated angle. "
+        if has_face_crop
+        else ""
+    )
+
     if stage == "internal_reference":
         prompt = (
+            f"{face_anchor}"
             "Generate a photorealistic reference image of the person wearing the requested clothes. "
             f"Use this camera framing: {angle_instruction}. "
             f"Garments: {garment_description}. "
@@ -173,6 +185,7 @@ def _generate_with_gemini(
         )
     else:
         prompt = (
+            f"{face_anchor}"
             "Generate a photorealistic final virtual try-on image using the provided internal reference images "
             "as strict consistency anchors for face, body shape, clothing fit, and garment details. "
             f"Camera framing: {angle_instruction}. "
@@ -254,6 +267,7 @@ async def _generate_angle_batch(
     body_description: str,
     angle_defs: List[Tuple[str, str]],
     stage: str,
+    has_face_crop: bool = False,
 ) -> Dict[str, bytes]:
     """Generate a batch of angles concurrently."""
     loop = asyncio.get_running_loop()
@@ -261,14 +275,16 @@ async def _generate_angle_batch(
     async def _run_angle(angle_name: str, instruction: str) -> Tuple[str, Optional[bytes]]:
         image = await loop.run_in_executor(
             _executor,
-            _generate_with_gemini,
-            reference_images,
-            garment_images,
-            garment_description,
-            body_description,
-            angle_name,
-            instruction,
-            stage,
+            lambda: _generate_with_gemini(
+                reference_images,
+                garment_images,
+                garment_description,
+                body_description,
+                angle_name,
+                instruction,
+                stage,
+                has_face_crop,
+            ),
         )
         return angle_name, image
 
@@ -285,6 +301,19 @@ async def _generate_angle_batch(
             images_by_angle[angle_name] = image_bytes
         else:
             logger.warning("No generated image for stage=%s angle=%s", stage, angle_name)
+
+    # Retry any missing angles (one at a time to avoid model overload)
+    missing = [
+        (name, instr) for name, instr in angle_defs
+        if name not in images_by_angle
+    ]
+    for angle_name, instruction in missing:
+        logger.info("Retrying failed angle: stage=%s angle=%s", stage, angle_name)
+        retry_name, retry_bytes = await _run_angle(angle_name, instruction)
+        if retry_bytes:
+            images_by_angle[retry_name] = retry_bytes
+        else:
+            logger.warning("Retry also failed for stage=%s angle=%s", stage, angle_name)
 
     return images_by_angle
 
@@ -374,6 +403,14 @@ async def generate_tryon_images(
             "final_angles": _sanitize_final_angles(final_angles),
         }
 
+    # Extract face crop for identity anchoring
+    face_crop = crop_face(base_reference, padding=0.4, max_size=512)
+    has_face = face_crop is not None
+    if has_face:
+        logger.info("Face crop extracted for user %s: %d bytes", user.uid, len(face_crop))
+    else:
+        logger.info("No face crop available for user %s, using full-body only", user.uid)
+
     garment_images: List[Tuple[Item, bytes]] = []
     for item in items:
         if not item.image_url:
@@ -400,13 +437,15 @@ async def generate_tryon_images(
     )
 
     # Stage A: internal references (front + profile)
+    stage_a_refs = ([face_crop] + [base_reference]) if has_face else [base_reference]
     internal_by_angle = await _generate_angle_batch(
-        reference_images=[base_reference],
+        reference_images=stage_a_refs,
         garment_images=garment_images,
         garment_description=garment_desc,
         body_description=body_desc,
         angle_defs=_INTERNAL_REFERENCE_ANGLES,
         stage="internal_reference",
+        has_face_crop=has_face,
     )
 
     internal_order = [angle for angle, _ in _INTERNAL_REFERENCE_ANGLES]
@@ -427,14 +466,16 @@ async def generate_tryon_images(
         internal_refs = [base_reference]
 
     # Stage B: final outputs based on internal references
+    stage_b_refs = ([face_crop] if has_face else []) + internal_refs
     final_defs = [(angle, _FINAL_ANGLE_INSTRUCTIONS[angle]) for angle in final_angle_list]
     final_by_angle = await _generate_angle_batch(
-        reference_images=internal_refs,
+        reference_images=stage_b_refs,
         garment_images=garment_images,
         garment_description=garment_desc,
         body_description=body_desc,
         angle_defs=final_defs,
         stage="final_tryon",
+        has_face_crop=has_face,
     )
 
     final_uploaded = _upload_image_set(
