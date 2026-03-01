@@ -392,49 +392,93 @@ var ZaraExtractor = (function () {
   }
 
   /**
-   * Try to map a text string to one of: tshirt, pants, jacket, sneakers.
-   * Returns null if no confident match.
+   * Map a text string to a backend-compatible category.
+   * Returns: "top" | "bottom" | "outerwear" | "shoes" | null
    */
   function normalizeCategory(raw) {
     if (!raw) return null;
     const s = raw.toLowerCase();
-    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho)\b/.test(s)) return "jacket";
-    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "pants";
-    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "sneakers";
-    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank)\b/.test(s)) return "tshirt";
+    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho|waistcoat)\b/.test(s)) return "outerwear";
+    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "bottom";
+    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "shoes";
+    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank|overshirt)\b/.test(s)) return "top";
     return null;
   }
 
   /**
-   * Infer category from breadcrumbs, product name, and URL path.
+   * Parse Zara URL path segments for category hints.
+   * Zara URLs: /en/man/t-shirts/basic-t-shirt-p06224463605.html
+   * The path segments between gender and product slug contain the category.
+   */
+  function categoryFromZaraPath() {
+    const path = window.location.pathname.toLowerCase();
+    // Zara path segments: /{lang}/{gender}/{category-slug}/...
+    const segments = path.split("/").filter(Boolean);
+
+    // Map well-known Zara URL slugs to our categories
+    const slugMap = {
+      // Tops
+      "t-shirts": "top", "shirts": "top", "polo-shirts": "top",
+      "tops": "top", "dresses": "top", "knitwear": "top",
+      "sweaters": "top", "sweatshirts": "top", "hoodies": "top",
+      "bodysuits": "top",
+      // Bottoms
+      "trousers": "bottom", "jeans": "bottom", "shorts": "bottom",
+      "skirts": "bottom", "joggers": "bottom", "leggings": "bottom",
+      "chinos": "bottom", "cargo": "bottom",
+      // Outerwear
+      "jackets": "outerwear", "coats": "outerwear", "blazers": "outerwear",
+      "puffers": "outerwear", "waistcoats": "outerwear",
+      "leather-jackets": "outerwear", "trench-coats": "outerwear",
+      "overshirts": "outerwear",
+      // Shoes
+      "shoes": "shoes", "boots": "shoes", "sneakers": "shoes",
+      "sandals": "shoes", "loafers": "shoes", "trainers": "shoes",
+    };
+
+    for (const seg of segments) {
+      if (slugMap[seg]) return slugMap[seg];
+    }
+    return null;
+  }
+
+  /**
+   * Infer category from Zara URL, breadcrumbs, product name, and URL path.
    */
   function extractCategory() {
-    // 1. Try breadcrumbs
+    // 1. Try Zara-specific URL path analysis (most reliable)
+    const fromPath = categoryFromZaraPath();
+    if (fromPath) return fromPath;
+
+    // 2. Try breadcrumbs
     const breadcrumbSelectors = [
       '[class*="breadcrumb"] a',
       '[class*="product-path"] a',
       'nav[aria-label="breadcrumb"] a',
+      '[class*="product-detail-breadcrumb"] a',
+      '[class*="layout-catalog-navigation"] a',
     ];
 
     for (const selector of breadcrumbSelectors) {
       const links = document.querySelectorAll(selector);
-      if (links.length > 1) {
-        const text = links[links.length - 1]?.textContent.trim();
+      // Walk from deepest to shallowest for best specificity
+      for (let i = links.length - 1; i >= 0; i--) {
+        const text = links[i]?.textContent.trim();
         const cat = normalizeCategory(text);
         if (cat) return cat;
       }
     }
 
-    // 2. Try product name
+    // 3. Try product name
     const name = extractName();
     const fromName = normalizeCategory(name);
     if (fromName) return fromName;
 
-    // 3. Try URL path
-    const fromUrl = normalizeCategory(window.location.pathname);
+    // 4. Try full URL text as fallback
+    const fromUrl = normalizeCategory(window.location.pathname.replace(/-/g, " "));
     if (fromUrl) return fromUrl;
 
-    return "tshirt";
+    return "top";
   }
 
   /**

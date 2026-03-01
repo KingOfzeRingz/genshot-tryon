@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import logging
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ENV_FILE = BACKEND_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -25,7 +29,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(DEFAULT_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )

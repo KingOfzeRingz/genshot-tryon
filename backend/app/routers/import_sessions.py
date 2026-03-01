@@ -49,26 +49,33 @@ def _as_optional_float(value: Any) -> Optional[float]:
         return None
 
 
-def _normalize_demo_category(raw_category: str) -> str:
+def _normalize_category(raw_category: str) -> str:
+    """Map any raw category string to one of: top, bottom, outerwear, shoes."""
     key = raw_category.strip().lower()
-    if key in {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "footwear"}:
+    if key in {
+        "shoe", "shoes", "sneaker", "sneakers", "boot", "boots",
+        "footwear", "sandal", "sandals", "loafer", "loafers", "trainer", "trainers",
+    }:
         return "shoes"
-    if key in {"outerwear", "jacket", "coat", "blazer"}:
+    if key in {
+        "outerwear", "jacket", "jackets", "coat", "coats", "blazer", "blazers",
+        "parka", "puffer", "trench", "waistcoat", "gilet", "vest",
+    }:
         return "outerwear"
-    if key in {"bottom", "bottoms", "pants", "trousers", "jeans", "shorts", "skirt"}:
+    if key in {
+        "bottom", "bottoms", "pants", "pant", "trousers", "trouser",
+        "jeans", "jean", "shorts", "short", "skirt", "skirts",
+        "legging", "leggings", "chino", "chinos", "jogger", "joggers",
+    }:
         return "bottom"
-    if key in {"top", "tops", "shirt", "t-shirt", "tshirt", "tee", "blouse", "dress"}:
+    if key in {
+        "top", "tops", "shirt", "shirts", "t-shirt", "tshirt", "tee",
+        "blouse", "dress", "dresses", "sweater", "knitwear", "knit",
+        "hoodie", "sweatshirt", "polo", "cardigan", "pullover",
+        "bodysuit", "jumpsuit", "romper", "jersey", "henley", "tank",
+    }:
         return "top"
     return "top"
-
-
-def _demo_name_for_category(category: str) -> str:
-    return {
-        "top": "T-Shirt",
-        "bottom": "Pants",
-        "outerwear": "Jacket",
-        "shoes": "Sneakers",
-    }.get(category, "T-Shirt")
 
 
 def _cache_image_to_gcs(image_url: str, session_id: str, index: int) -> Optional[str]:
@@ -132,45 +139,172 @@ def _parse_measurement_value(text: str) -> Optional[float]:
     return None
 
 
-def _parse_size_grid(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build a size_grid from the extension's sizes / sizeChart fields."""
-    size_chart = raw.get("sizeChart") or []
-    sizes = raw.get("sizes") or []
+# Realistic Zara-style measurement tables indexed by letter size.
+# Values in cm.  When the label is numeric (EU 36-46) we map it to the
+# closest letter equivalent.
+_ZARA_TOPS: Dict[str, Dict[str, float]] = {
+    "XS": {"chest_cm": 88, "shoulder_cm": 42, "length_cm": 68, "sleeve_cm": 60},
+    "S":  {"chest_cm": 92, "shoulder_cm": 44, "length_cm": 70, "sleeve_cm": 62},
+    "M":  {"chest_cm": 98, "shoulder_cm": 46, "length_cm": 72, "sleeve_cm": 64},
+    "L":  {"chest_cm": 104, "shoulder_cm": 48, "length_cm": 74, "sleeve_cm": 66},
+    "XL": {"chest_cm": 110, "shoulder_cm": 50, "length_cm": 76, "sleeve_cm": 68},
+    "XXL": {"chest_cm": 116, "shoulder_cm": 52, "length_cm": 78, "sleeve_cm": 70},
+}
 
-    grid: List[Dict[str, Any]] = []
+_ZARA_BOTTOMS: Dict[str, Dict[str, float]] = {
+    "XS": {"waist_cm": 74, "hip_cm": 92, "inseam_cm": 76, "length_cm": 102},
+    "S":  {"waist_cm": 78, "hip_cm": 96, "inseam_cm": 78, "length_cm": 104},
+    "M":  {"waist_cm": 82, "hip_cm": 100, "inseam_cm": 80, "length_cm": 106},
+    "L":  {"waist_cm": 86, "hip_cm": 104, "inseam_cm": 82, "length_cm": 108},
+    "XL": {"waist_cm": 90, "hip_cm": 108, "inseam_cm": 82, "length_cm": 108},
+    "XXL": {"waist_cm": 94, "hip_cm": 112, "inseam_cm": 82, "length_cm": 108},
+    # EU numeric aliases
+    "36": {"waist_cm": 74, "hip_cm": 92, "inseam_cm": 76, "length_cm": 102},
+    "38": {"waist_cm": 78, "hip_cm": 96, "inseam_cm": 78, "length_cm": 104},
+    "40": {"waist_cm": 82, "hip_cm": 100, "inseam_cm": 80, "length_cm": 106},
+    "42": {"waist_cm": 86, "hip_cm": 104, "inseam_cm": 82, "length_cm": 108},
+    "44": {"waist_cm": 90, "hip_cm": 108, "inseam_cm": 82, "length_cm": 108},
+    "46": {"waist_cm": 94, "hip_cm": 112, "inseam_cm": 82, "length_cm": 108},
+}
 
-    if size_chart and isinstance(size_chart, list):
-        for entry in size_chart:
-            label = _as_string(entry.get("size"), "")
-            if not label:
-                continue
-            raw_measurements = entry.get("measurements", {})
-            measurements: Dict[str, float] = {}
-            if isinstance(raw_measurements, dict):
-                for key, val in raw_measurements.items():
-                    parsed = _parse_measurement_value(val)
-                    if parsed is not None:
-                        # Normalize key: "Chest" → "chest_cm", "Hip" → "hip_cm"
-                        norm_key = key.strip().lower().replace(" ", "_")
-                        if not norm_key.endswith("_cm"):
-                            norm_key += "_cm"
-                        measurements[norm_key] = parsed
-            grid.append({"size_label": label, "measurements": measurements})
-    elif sizes and isinstance(sizes, list):
-        # Extension only sent labels (no measurement data)
-        for entry in sizes:
-            if isinstance(entry, dict):
-                label = _as_string(entry.get("label"), "")
-                available = entry.get("available", True)
-            elif isinstance(entry, str):
-                label = entry.strip()
-                available = True
-            else:
-                continue
-            if label and available:
-                grid.append({"size_label": label, "measurements": {}})
+_ZARA_OUTERWEAR: Dict[str, Dict[str, float]] = {
+    "XS": {"chest_cm": 94, "shoulder_cm": 44, "length_cm": 66, "sleeve_cm": 62},
+    "S":  {"chest_cm": 98, "shoulder_cm": 46, "length_cm": 68, "sleeve_cm": 64},
+    "M":  {"chest_cm": 104, "shoulder_cm": 48, "length_cm": 70, "sleeve_cm": 66},
+    "L":  {"chest_cm": 110, "shoulder_cm": 50, "length_cm": 72, "sleeve_cm": 68},
+    "XL": {"chest_cm": 116, "shoulder_cm": 52, "length_cm": 74, "sleeve_cm": 70},
+    "XXL": {"chest_cm": 122, "shoulder_cm": 54, "length_cm": 76, "sleeve_cm": 72},
+}
 
-    return grid
+_ZARA_SHOES: Dict[str, Dict[str, float]] = {
+    "38": {"foot_length_cm": 24.0},
+    "39": {"foot_length_cm": 24.5},
+    "40": {"foot_length_cm": 25.5},
+    "41": {"foot_length_cm": 26.0},
+    "42": {"foot_length_cm": 27.0},
+    "43": {"foot_length_cm": 27.5},
+    "44": {"foot_length_cm": 28.5},
+    "45": {"foot_length_cm": 29.0},
+    "46": {"foot_length_cm": 29.5},
+}
+
+_ZARA_TABLES: Dict[str, Dict[str, Dict[str, float]]] = {
+    "top": _ZARA_TOPS,
+    "bottom": _ZARA_BOTTOMS,
+    "outerwear": _ZARA_OUTERWEAR,
+    "shoes": _ZARA_SHOES,
+}
+
+# ---------------------------------------------------------------------------
+# H&M measurement tables (cm).  H&M sizing is slightly roomier than Zara.
+# ---------------------------------------------------------------------------
+_HM_TOPS: Dict[str, Dict[str, float]] = {
+    "XS":  {"chest_cm": 90,  "shoulder_cm": 43, "length_cm": 69, "sleeve_cm": 61},
+    "S":   {"chest_cm": 96,  "shoulder_cm": 45, "length_cm": 71, "sleeve_cm": 63},
+    "M":   {"chest_cm": 102, "shoulder_cm": 47, "length_cm": 73, "sleeve_cm": 65},
+    "L":   {"chest_cm": 108, "shoulder_cm": 49, "length_cm": 75, "sleeve_cm": 67},
+    "XL":  {"chest_cm": 114, "shoulder_cm": 51, "length_cm": 77, "sleeve_cm": 69},
+    "XXL": {"chest_cm": 120, "shoulder_cm": 53, "length_cm": 79, "sleeve_cm": 71},
+}
+
+_HM_BOTTOMS: Dict[str, Dict[str, float]] = {
+    "XS":  {"waist_cm": 72,  "hip_cm": 94,  "inseam_cm": 78, "length_cm": 104},
+    "S":   {"waist_cm": 76,  "hip_cm": 98,  "inseam_cm": 80, "length_cm": 106},
+    "M":   {"waist_cm": 82,  "hip_cm": 102, "inseam_cm": 81, "length_cm": 107},
+    "L":   {"waist_cm": 88,  "hip_cm": 106, "inseam_cm": 82, "length_cm": 108},
+    "XL":  {"waist_cm": 94,  "hip_cm": 112, "inseam_cm": 82, "length_cm": 108},
+    "XXL": {"waist_cm": 100, "hip_cm": 118, "inseam_cm": 82, "length_cm": 108},
+    # Numeric waist sizes (inches → letter mapping handled below)
+    "28": {"waist_cm": 72, "hip_cm": 92,  "inseam_cm": 78, "length_cm": 104},
+    "29": {"waist_cm": 74, "hip_cm": 94,  "inseam_cm": 79, "length_cm": 105},
+    "30": {"waist_cm": 76, "hip_cm": 96,  "inseam_cm": 80, "length_cm": 106},
+    "31": {"waist_cm": 79, "hip_cm": 99,  "inseam_cm": 80, "length_cm": 106},
+    "32": {"waist_cm": 82, "hip_cm": 102, "inseam_cm": 81, "length_cm": 107},
+    "33": {"waist_cm": 85, "hip_cm": 104, "inseam_cm": 81, "length_cm": 107},
+    "34": {"waist_cm": 88, "hip_cm": 106, "inseam_cm": 82, "length_cm": 108},
+    "36": {"waist_cm": 94, "hip_cm": 112, "inseam_cm": 82, "length_cm": 108},
+}
+
+_HM_OUTERWEAR: Dict[str, Dict[str, float]] = {
+    "XS":  {"chest_cm": 96,  "shoulder_cm": 45, "length_cm": 67, "sleeve_cm": 63},
+    "S":   {"chest_cm": 102, "shoulder_cm": 47, "length_cm": 69, "sleeve_cm": 65},
+    "M":   {"chest_cm": 108, "shoulder_cm": 49, "length_cm": 71, "sleeve_cm": 67},
+    "L":   {"chest_cm": 114, "shoulder_cm": 51, "length_cm": 73, "sleeve_cm": 69},
+    "XL":  {"chest_cm": 120, "shoulder_cm": 53, "length_cm": 75, "sleeve_cm": 71},
+    "XXL": {"chest_cm": 126, "shoulder_cm": 55, "length_cm": 77, "sleeve_cm": 73},
+}
+
+_HM_SHOES: Dict[str, Dict[str, float]] = {
+    "38": {"foot_length_cm": 24.0},
+    "39": {"foot_length_cm": 24.5},
+    "40": {"foot_length_cm": 25.5},
+    "41": {"foot_length_cm": 26.0},
+    "42": {"foot_length_cm": 27.0},
+    "43": {"foot_length_cm": 27.5},
+    "44": {"foot_length_cm": 28.5},
+    "45": {"foot_length_cm": 29.0},
+    "46": {"foot_length_cm": 29.5},
+}
+
+_HM_TABLES: Dict[str, Dict[str, Dict[str, float]]] = {
+    "top": _HM_TOPS,
+    "bottom": _HM_BOTTOMS,
+    "outerwear": _HM_OUTERWEAR,
+    "shoes": _HM_SHOES,
+}
+
+# Brand → tables mapping.  Defaults to Zara.
+_BRAND_TABLES: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {
+    "zara": _ZARA_TABLES,
+    "h&m": _HM_TABLES,
+    "hm": _HM_TABLES,
+    "h & m": _HM_TABLES,
+}
+
+# Map EU numeric clothing sizes to letter equivalents for lookup.
+_EU_TO_LETTER = {"36": "XS", "38": "S", "40": "M", "42": "L", "44": "XL", "46": "XXL"}
+
+
+def _generate_measurements(category: str, size_label: str, brand: str = "") -> Dict[str, float]:
+    """Return realistic measurements for a given category + size label.
+
+    Uses brand-specific tables when available (H&M, Zara), falling back
+    to Zara tables as default.
+    """
+    brand_key = brand.strip().lower()
+    tables = _BRAND_TABLES.get(brand_key, _ZARA_TABLES)
+    table = tables.get(category, tables.get("top", _ZARA_TOPS))
+    label = size_label.strip().upper()
+
+    # Direct lookup
+    if label in table:
+        return dict(table[label])
+
+    # Try EU numeric → letter conversion (for non-shoe categories)
+    if category != "shoes" and label in _EU_TO_LETTER:
+        letter = _EU_TO_LETTER[label]
+        if letter in table:
+            return dict(table[letter])
+
+    return {}
+
+
+_STANDARD_CLOTHING_SIZES = ["XS", "S", "M", "L", "XL", "XXL"]
+_STANDARD_SHOE_SIZES = ["38", "39", "40", "41", "42", "43", "44", "45", "46"]
+
+
+def _parse_size_grid(raw: Dict[str, Any], category: str, brand: str = "") -> List[Dict[str, Any]]:
+    """Return standard sizes with brand-appropriate measurements.
+
+    Always uses a fixed set of sizes (letter sizes for clothing, EU numeric
+    for shoes) so the demo experience is consistent regardless of what the
+    extension extracted.
+    """
+    labels = _STANDARD_SHOE_SIZES if category == "shoes" else _STANDARD_CLOTHING_SIZES
+    return [
+        {"size_label": label, "measurements": _generate_measurements(category, label, brand)}
+        for label in labels
+    ]
 
 
 @router.post(
@@ -210,20 +344,27 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
         # Resolve product_url: extension sends `productUrl` (camelCase)
         product_url = _as_string(raw.get("product_url"), "") or _as_string(raw.get("productUrl"), "")
 
-        # Demo simplification: map all imported garments into 4 canonical categories.
-        # Input can come in as `category`, `garment_type`, or `garmentType`.
+        # Resolve category from various extension field names.
         source_category = (
             _as_string(raw.get("category"), "")
             or _as_string(raw.get("garment_type"), "")
             or _as_string(raw.get("garmentType"), "")
         )
-        category = _normalize_demo_category(source_category)
-        normalized_name = _demo_name_for_category(category)
+        category = _normalize_category(source_category)
 
-        size_grid_data = _parse_size_grid(raw)
+        # Use actual product name from the extension; fall back to category label.
+        item_name = _as_string(raw.get("name"), "")
+        if not item_name:
+            item_name = {
+                "top": "Top", "bottom": "Pants",
+                "outerwear": "Jacket", "shoes": "Shoes",
+            }.get(category, "Item")
+
+        brand = _as_string(raw.get("brand"), "")
+        size_grid_data = _parse_size_grid(raw, category, brand)
 
         item = Item(
-            name=normalized_name,
+            name=item_name,
             brand=_as_string(raw.get("brand"), ""),
             category=category,
             image_url=image_url,

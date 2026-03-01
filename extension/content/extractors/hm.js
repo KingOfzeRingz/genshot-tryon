@@ -52,6 +52,57 @@ var HMExtractor = (function () {
   }
 
   /**
+   * Extract product data from H&M's __NEXT_DATA__ (Next.js hydration payload).
+   * This is the most reliable source on H&M's newer productpage.XXXXX.html pages
+   * where JSON-LD and breadcrumbs may be absent.
+   *
+   * Returns a flat object: { category, name, price, currency } (all optional).
+   */
+  function extractNextData() {
+    const result = {};
+    try {
+      const el = document.getElementById("__NEXT_DATA__");
+      if (!el) return result;
+      const nd = JSON.parse(el.textContent);
+
+      // H&M nests product data under varying paths — try common ones
+      const pp = nd?.props?.pageProps;
+      const product =
+        pp?.product || pp?.productData || pp?.pdpData?.product || null;
+      if (!product) return result;
+
+      // Category: H&M uses categoryName, mainCategoryCode, or category
+      const catRaw =
+        product.categoryName ||
+        product.mainCategory?.name ||
+        product.category ||
+        product.departmentName ||
+        "";
+      if (catRaw) result.category = catRaw;
+
+      // Name
+      if (product.name || product.productName || product.title) {
+        result.name = product.name || product.productName || product.title;
+      }
+
+      // Price — H&M stores whitePrice (regular) and redPrice (sale)
+      const redPrice = product.redPrice || product.price?.redPrice;
+      const whitePrice = product.whitePrice || product.price?.whitePrice;
+      const priceObj = redPrice || whitePrice;
+      if (priceObj) {
+        const val = parseFloat(priceObj.price ?? priceObj.value ?? priceObj);
+        if (!isNaN(val)) {
+          result.price = val;
+          result.currency = priceObj.currency || priceObj.currencyIso || null;
+        }
+      }
+    } catch {
+      // __NEXT_DATA__ missing or malformed — not critical
+    }
+    return result;
+  }
+
+  /**
    * Extract the product name.
    */
   function extractName(jsonLd) {
@@ -106,12 +157,18 @@ var HMExtractor = (function () {
    * Detect currency from text containing a price.
    */
   function detectCurrency(text) {
+    if (text.includes("\u00A3") || text.includes("£")) return "GBP";
+    if (text.includes("\u20AC") || text.includes("€")) return "EUR";
     if (text.includes("$")) return "USD";
-    if (text.includes("\u20AC")) return "EUR";
-    if (text.includes("\u00A3")) return "GBP";
     if (/\bkr\.?\b/i.test(text)) return "SEK";
     if (text.includes("\u20BD")) return "RUB";
-    if (text.includes("\u00A5")) return "JPY";
+    if (text.includes("\u00A5") || text.includes("¥")) return "JPY";
+    // H&M locale hints from URL or page lang
+    const path = window.location.pathname;
+    if (path.startsWith("/en_gb")) return "GBP";
+    if (path.startsWith("/en_us")) return "USD";
+    if (path.match(/^\/(de|fr|it|es|nl|at|be)_/)) return "EUR";
+    if (path.startsWith("/sv_")) return "SEK";
     const lang = document.documentElement.lang || "";
     if (lang.startsWith("sv")) return "SEK";
     if (lang.startsWith("de") || lang.startsWith("fr") || lang.startsWith("it")) return "EUR";
@@ -120,14 +177,14 @@ var HMExtractor = (function () {
 
   /**
    * Extract price and currency.
+   * Prioritizes: JSON-LD → __NEXT_DATA__ → DOM (red > sale > current > member > regular) → meta.
    */
-  function extractPrice(jsonLd) {
+  function extractPrice(jsonLd, nextData) {
     const result = { price: null, currency: null };
 
     // Try JSON-LD first
     if (jsonLd?.offers) {
       const offers = Array.isArray(jsonLd.offers) ? jsonLd.offers : [jsonLd.offers];
-      // Prefer the lowest current price (sale price)
       let best = null;
       for (const offer of offers) {
         if (offer.price != null) {
@@ -142,14 +199,34 @@ var HMExtractor = (function () {
       }
     }
 
-    // DOM fallback — prefer "current" / "sale" selectors
+    // Try __NEXT_DATA__ (has redPrice / whitePrice parsed already)
+    if (nextData?.price != null) {
+      result.price = nextData.price;
+      result.currency = nextData.currency || null;
+      return result;
+    }
+
+    // DOM fallback — ordered: red/sale → current → member → general.
+    // H&M uses data-testid="red-price" / "current-price" directly on the
+    // price <span>, NOT nested inside a "product-price" container.
     const priceSelectors = [
+      // H&M data-testid price spans (the actual elements on the page)
+      '[data-testid="red-price"]',
+      '[data-testid="sale-price"]',
+      '[data-testid="current-price"]',
+      // Nested inside a product-price container (older layout)
       '[data-testid="product-price"] [class*="sale"]',
-      '[data-testid="product-price"] [class*="current"]',
+      '[data-testid="product-price"] [class*="red"]',
       '[data-testid="product-price"]',
+      // Class-based patterns
       '[class*="ProductPrice"] [class*="sale"]',
       '[class*="ProductPrice"] [class*="red"]',
+      '[class*="ProductPrice"] [class*="current"]',
       '[class*="ProductPrice"]',
+      // Member price
+      '[class*="member-price"] [class*="amount"]',
+      '[class*="MemberPrice"]',
+      // Generic
       '.product-item-price span',
       '[class*="product-price"]',
       '[id*="product-price"]',
@@ -159,11 +236,13 @@ var HMExtractor = (function () {
     for (const selector of priceSelectors) {
       const el = document.querySelector(selector);
       if (el) {
-        const text = el.textContent.trim();
+        let text = el.textContent.trim();
+        // Strip "From" / "Member price" prefixes
+        text = text.replace(/^(?:from|member\s+price|price)\s*:?\s*/i, "");
         const parsed = parsePriceText(text);
         if (parsed !== null) {
           result.price = parsed;
-          result.currency = detectCurrency(text);
+          result.currency = detectCurrency(el.textContent);
           return result;
         }
       }
@@ -172,10 +251,13 @@ var HMExtractor = (function () {
     // Meta tag fallback
     const priceMeta = document.querySelector('meta[property="product:price:amount"]');
     if (priceMeta) {
-      result.price = parseFloat(priceMeta.getAttribute("content"));
-      const currMeta = document.querySelector('meta[property="product:price:currency"]');
-      if (currMeta) result.currency = currMeta.getAttribute("content");
-      return result;
+      const val = parseFloat(priceMeta.getAttribute("content"));
+      if (!isNaN(val)) {
+        result.price = val;
+        const currMeta = document.querySelector('meta[property="product:price:currency"]');
+        if (currMeta) result.currency = currMeta.getAttribute("content");
+        return result;
+      }
     }
 
     return result;
@@ -449,55 +531,129 @@ var HMExtractor = (function () {
   }
 
   /**
-   * Try to map a text string to one of: tshirt, pants, jacket, sneakers.
-   * Returns null if no confident match.
+   * Map a text string to a backend-compatible category.
+   * Returns: "top" | "bottom" | "outerwear" | "shoes" | null
    */
   function normalizeCategory(raw) {
     if (!raw) return null;
     const s = raw.toLowerCase();
-    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho)\b/.test(s)) return "jacket";
-    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "pants";
-    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "sneakers";
-    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank)\b/.test(s)) return "tshirt";
+    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho|waistcoat)\b/.test(s)) return "outerwear";
+    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "bottom";
+    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "shoes";
+    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank)\b/.test(s)) return "top";
     return null;
   }
 
   /**
-   * Infer category from JSON-LD, breadcrumbs, product name, and URL path.
+   * Parse H&M URL path for category hints.
+   * H&M product URLs:
+   *   /en_us/men/product/t-shirts/slim-fit-t-shirt.1234567.html
+   *   /en_us/productpage.1234567001.html  (no category in path)
+   * Category pages:
+   *   /en_us/men/products/t-shirts-tank-tops.html
    */
-  function extractCategory(jsonLd) {
-    // 1. Try JSON-LD category
-    if (jsonLd?.category) {
-      const cat = normalizeCategory(jsonLd.category);
-      if (cat) return cat;
+  function categoryFromHMPath() {
+    const path = window.location.pathname.toLowerCase();
+    const segments = path.split("/").filter(Boolean);
+
+    const slugMap = {
+      // Tops
+      "t-shirts": "top", "t-shirts-tank-tops": "top", "tank-tops": "top",
+      "shirts": "top", "polo-shirts": "top", "tops": "top",
+      "dresses": "top", "knitwear": "top", "cardigans-jumpers": "top",
+      "sweaters": "top", "sweatshirts": "top", "hoodies-sweatshirts": "top",
+      "hoodies": "top", "bodysuits": "top", "blouses": "top",
+      "tunics": "top",
+      // Bottoms
+      "trousers": "bottom", "jeans": "bottom", "shorts": "bottom",
+      "skirts": "bottom", "joggers": "bottom", "leggings": "bottom",
+      "chinos": "bottom", "cargo-trousers": "bottom", "cargo-pants": "bottom",
+      "wide-leg-trousers": "bottom", "slim-fit-jeans": "bottom",
+      // Outerwear
+      "jackets": "outerwear", "coats": "outerwear", "jackets-coats": "outerwear",
+      "blazers": "outerwear", "puffers": "outerwear", "waistcoats": "outerwear",
+      "leather-jackets": "outerwear", "denim-jackets": "outerwear",
+      "bomber-jackets": "outerwear", "shackets": "outerwear",
+      "overshirts": "outerwear",
+      // Shoes
+      "shoes": "shoes", "boots": "shoes", "sneakers": "shoes",
+      "sandals": "shoes", "loafers": "shoes", "slippers": "shoes",
+    };
+
+    for (const seg of segments) {
+      if (slugMap[seg]) return slugMap[seg];
     }
 
-    // 2. Try breadcrumbs
+    // Also check compound segments like "product/t-shirts"
+    const joined = segments.join("/");
+    for (const [slug, cat] of Object.entries(slugMap)) {
+      if (joined.includes("/" + slug + "/") || joined.includes("/" + slug + ".")) {
+        return cat;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Infer category from H&M URL, __NEXT_DATA__, JSON-LD, breadcrumbs, and product name.
+   */
+  function extractCategory(jsonLd, nextData) {
+    // 1. Try H&M URL path analysis (most reliable when path has category)
+    const fromPath = categoryFromHMPath();
+    if (fromPath) return fromPath;
+
+    // 2. Try __NEXT_DATA__ category (best source for productpage.XXXXX.html URLs)
+    if (nextData?.category) {
+      const parts = nextData.category.split(/\s*[\/|>,]\s*/);
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const cat = normalizeCategory(parts[i]);
+        if (cat) return cat;
+      }
+    }
+
+    // 3. Try JSON-LD category — H&M uses compound paths like "Men / T-shirts & Tank Tops"
+    if (jsonLd?.category) {
+      const parts = jsonLd.category.split(/\s*[\/|>]\s*/);
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const cat = normalizeCategory(parts[i]);
+        if (cat) return cat;
+      }
+    }
+
+    // 4. Try breadcrumbs (walk deepest to shallowest)
     const breadcrumbSelectors = [
       '[class*="breadcrumb"] a',
       'nav[aria-label*="breadcrumb"] a',
       '[class*="Breadcrumb"] a',
+      '[class*="BreadCrumb"] a',
     ];
 
     for (const selector of breadcrumbSelectors) {
       const links = document.querySelectorAll(selector);
-      if (links.length > 1) {
-        const text = links[links.length - 1]?.textContent.trim();
+      for (let i = links.length - 1; i >= 0; i--) {
+        const text = links[i]?.textContent.trim();
         const cat = normalizeCategory(text);
         if (cat) return cat;
       }
     }
 
-    // 3. Try product name (from JSON-LD or DOM)
+    // 5. Try product name
     const name = extractName(jsonLd);
     const fromName = normalizeCategory(name);
     if (fromName) return fromName;
 
-    // 4. Try URL path
-    const fromUrl = normalizeCategory(window.location.pathname);
+    // 6. Try __NEXT_DATA__ name as last resort (may differ from DOM h1)
+    if (nextData?.name) {
+      const fromNd = normalizeCategory(nextData.name);
+      if (fromNd) return fromNd;
+    }
+
+    // 7. Try full URL text as fallback
+    const fromUrl = normalizeCategory(window.location.pathname.replace(/-/g, " "));
     if (fromUrl) return fromUrl;
 
-    return "tshirt";
+    return "top";
   }
 
   /**
@@ -505,12 +661,13 @@ var HMExtractor = (function () {
    */
   function extract() {
     const jsonLd = extractJsonLd();
-    const { price, currency } = extractPrice(jsonLd);
+    const nextData = extractNextData();
+    const { price, currency } = extractPrice(jsonLd, nextData);
 
     return {
-      name: extractName(jsonLd),
+      name: nextData?.name || extractName(jsonLd),
       brand: "H&M",
-      category: extractCategory(jsonLd),
+      category: extractCategory(jsonLd, nextData),
       price,
       currency,
       color: extractColor(jsonLd),
@@ -520,8 +677,8 @@ var HMExtractor = (function () {
       productUrl: window.location.href,
       sizeChart: extractSizeChart(),
       extractedAt: new Date().toISOString(),
-      extractorVersion: "1.0.0",
-      confidence: jsonLd ? "high" : "medium",
+      extractorVersion: "1.1.0",
+      confidence: jsonLd || Object.keys(nextData).length > 0 ? "high" : "medium",
     };
   }
 

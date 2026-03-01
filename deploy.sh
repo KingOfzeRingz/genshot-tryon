@@ -21,18 +21,45 @@ set -euo pipefail
 
 # ── Load backend/.env if present (keys not already in environment) ───
 SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "${SCRIPT_DIR_EARLY}/backend/.env" ]]; then
-    while IFS='=' read -r key value; do
-        # Skip comments and blank lines
-        [[ -z "$key" || "$key" == \#* ]] && continue
-        # Strip surrounding quotes from value
-        value="${value%\"}"
-        value="${value#\"}"
-        # Only set if not already exported in the shell environment
-        if [[ -z "${!key+x}" ]]; then
-            export "$key=$value"
+ENV_FILE="${SCRIPT_DIR_EARLY}/backend/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Normalise line endings and skip comments/blank lines
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ "${line}" == *"="* ]] || continue
+
+        key="${line%%=*}"
+        value="${line#*=}"
+
+        # Trim surrounding whitespace
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+
+        # Accept optional "export KEY=VALUE" format.
+        if [[ "${key}" == export[[:space:]]* ]]; then
+            key="${key#export }"
+            key="${key#"${key%%[![:space:]]*}"}"
         fi
-    done < "${SCRIPT_DIR_EARLY}/backend/.env"
+
+        # Skip invalid variable names
+        [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+        # Remove matching surrounding quotes if present.
+        if [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+
+        # Preserve explicitly provided shell values, but treat empty as unset.
+        if [[ -z "${!key:-}" ]]; then
+            export "${key}=${value}"
+        fi
+    done < "${ENV_FILE}"
 fi
 
 # ── Defaults ──────────────────────────────────────────────────────────
@@ -150,6 +177,7 @@ do_setup() {
 do_deploy() {
     info "Deploying backend to Cloud Run..."
     [[ -n "${TRYON_IMAGE_MODELS}" ]] || fail "TRYON_IMAGE_MODELS is required (comma-separated model IDs)."
+    [[ -n "${REVE_API_KEY}" ]] || warn "REVE_API_KEY is empty; REVE provider will be skipped."
 
     # Build with Cloud Build (no local Docker needed)
     info "Building container image with Cloud Build..."
@@ -203,6 +231,7 @@ do_deploy() {
 do_local() {
     info "Building and running backend locally with Docker..."
     [[ -n "${TRYON_IMAGE_MODELS}" ]] || fail "TRYON_IMAGE_MODELS is required (comma-separated model IDs)."
+    [[ -n "${REVE_API_KEY}" ]] || warn "REVE_API_KEY is empty; REVE provider will be skipped."
     cd "${BACKEND_DIR}"
 
     docker build -t genshot-tryon-api .
