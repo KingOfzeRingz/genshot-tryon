@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -26,6 +26,24 @@ from app.utils.qr import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/import-sessions", tags=["Import Sessions"])
+
+
+def _as_string(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
+def _as_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post(
@@ -46,31 +64,34 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
     for raw in payload.items:
         # Resolve image_url: extension sends `images` (array), backend wants `image_url` (string)
-        image_url = raw.get("image_url", "")
+        image_url = _as_string(raw.get("image_url"), "")
         if not image_url:
-            images = raw.get("images", [])
-            if isinstance(images, list) and images:
-                image_url = images[0]
+            images = raw.get("images")
+            if isinstance(images, list):
+                image_url = next(
+                    (_as_string(candidate, "") for candidate in images if _as_string(candidate, "")),
+                    "",
+                )
 
         # Resolve product_url: extension sends `productUrl` (camelCase)
-        product_url = raw.get("product_url", "") or raw.get("productUrl", "")
+        product_url = _as_string(raw.get("product_url"), "") or _as_string(raw.get("productUrl"), "")
 
         # Validate category against allowed values
-        category = raw.get("category", "top")
+        category = _as_string(raw.get("category"), "top").lower()
         valid_categories = {"top", "bottom", "outerwear", "shoes", "accessory"}
         if category not in valid_categories:
             category = "top"
 
         item = Item(
-            name=raw.get("name", "Unknown Item"),
-            brand=raw.get("brand", ""),
+            name=_as_string(raw.get("name"), "Unknown Item"),
+            brand=_as_string(raw.get("brand"), ""),
             category=category,
             image_url=image_url,
             product_url=product_url,
-            price=raw.get("price"),
-            currency=raw.get("currency", "USD"),
-            color=raw.get("color", ""),
-            material=raw.get("material", ""),
+            price=_as_optional_float(raw.get("price")),
+            currency=_as_string(raw.get("currency"), "USD"),
+            color=_as_string(raw.get("color"), ""),
+            material=_as_string(raw.get("material"), ""),
             size_grid=[],  # will be enriched later via size chart parsing
         )
         items.append(item.model_dump(mode="json"))

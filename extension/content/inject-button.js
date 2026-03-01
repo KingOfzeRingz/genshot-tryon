@@ -323,8 +323,8 @@
     }
 
     try {
-      // Screen-to-screen scanning works best with larger modules.
-      var qr = new QRCode(0, QRCode.ErrorCorrectLevel.L);
+      // Our bundled generator targets EC level M; using L can yield invalid matrices.
+      var qr = new QRCode(0, QRCode.ErrorCorrectLevel.M);
       qr.addData(url);
       qr.make();
 
@@ -332,8 +332,14 @@
       var ctx = qrCanvas.getContext("2d");
       var quietZoneModules = 4;
       var totalModules = moduleCount + quietZoneModules * 2;
-      var targetSize = 340;
-      var modulePixelSize = Math.max(6, Math.floor(targetSize / totalModules));
+      var targetSize = 420;
+      var qrState = stateEls.qr;
+      var visibleStateWidth = (stateEls.creating && stateEls.creating.clientWidth) || (stateEls.ready && stateEls.ready.clientWidth) || 0;
+      var qrStateWidth = Math.floor((qrState && qrState.clientWidth) || visibleStateWidth || 320);
+      var framePadding = 28; // .gs-qr-frame horizontal padding (14 + 14)
+      var maxDrawableSize = Math.max(200, qrStateWidth - framePadding);
+      var effectiveTarget = Math.min(targetSize, maxDrawableSize);
+      var modulePixelSize = Math.max(5, Math.floor(effectiveTarget / totalModules));
       var qrSize = totalModules * modulePixelSize;
       var dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
@@ -359,6 +365,12 @@
         }
       }
 
+      var frame = qrCanvas.closest(".gs-qr-frame");
+      if (frame) {
+        frame.style.width = (qrSize + framePadding) + "px";
+        frame.style.maxWidth = "100%";
+      }
+
       setImportState(ImportStates.qr);
       showState("qr");
     } catch (err) {
@@ -370,6 +382,14 @@
   function normalizeQrValue(value) {
     if (value == null) return "";
     return String(value).trim();
+  }
+
+  function getQrDebugPayload() {
+    try {
+      return normalizeQrValue(localStorage.getItem("genshot.tryon.qrTestPayload"));
+    } catch {
+      return "";
+    }
   }
 
   function buildScannerPayload(sid) {
@@ -445,17 +465,19 @@
     showState("creating");
 
     var item = {
-      name: currentProduct.name,
-      brand: currentProduct.brand,
-      category: currentProduct.category,
-      price: currentProduct.price,
-      currency: currentProduct.currency,
-      color: currentProduct.color,
-      material: currentProduct.material,
-      sizes: currentProduct.sizes,
-      images: currentProduct.images,
-      productUrl: currentProduct.productUrl,
-      sizeChart: currentProduct.sizeChart,
+      name: (typeof currentProduct.name === "string" && currentProduct.name.trim()) ? currentProduct.name.trim() : "Unknown Item",
+      brand: (typeof currentProduct.brand === "string") ? currentProduct.brand.trim() : "",
+      category: (typeof currentProduct.category === "string" && currentProduct.category.trim()) ? currentProduct.category.trim() : "top",
+      price: Number.isFinite(Number(currentProduct.price)) ? Number(currentProduct.price) : null,
+      currency: (typeof currentProduct.currency === "string" && currentProduct.currency.trim()) ? currentProduct.currency.trim() : "USD",
+      color: (typeof currentProduct.color === "string") ? currentProduct.color.trim() : "",
+      material: (typeof currentProduct.material === "string") ? currentProduct.material.trim() : "",
+      sizes: Array.isArray(currentProduct.sizes) ? currentProduct.sizes : [],
+      images: Array.isArray(currentProduct.images) ? currentProduct.images.filter(function (img) {
+        return typeof img === "string" && img.trim();
+      }) : [],
+      productUrl: (typeof currentProduct.productUrl === "string") ? currentProduct.productUrl.trim() : "",
+      sizeChart: Array.isArray(currentProduct.sizeChart) ? currentProduct.sizeChart : [],
     };
 
     safeSendMessage(
@@ -471,10 +493,14 @@
         }
 
         var data = response.data;
-        var qrUrl = resolveQrPayload(data);
+        var debugPayload = getQrDebugPayload();
+        var qrUrl = debugPayload || resolveQrPayload(data);
         if (!qrUrl) {
           showError("Backend returned invalid session data");
           return;
+        }
+        if (debugPayload) {
+          console.info("[GenShot TryOn] QR test payload override active:", debugPayload);
         }
         renderQrCode(qrUrl);
       }

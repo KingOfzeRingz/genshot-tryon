@@ -175,8 +175,8 @@
     }
 
     try {
-      // Screen-to-screen scanning works best with larger modules.
-      const errorCorrection = QRCode.ErrorCorrectLevel.L;
+      // Our bundled generator targets EC level M; using L can yield invalid matrices.
+      const errorCorrection = QRCode.ErrorCorrectLevel.M;
       const qr = new QRCode(0, errorCorrection);
       qr.addData(url);
       qr.make();
@@ -186,8 +186,13 @@
       const ctx = canvas.getContext("2d");
       const quietZoneModules = 4;
       const totalModules = moduleCount + quietZoneModules * 2;
-      const targetSize = 340;
-      const modulePixelSize = Math.max(6, Math.floor(targetSize / totalModules));
+      const targetSize = 420;
+      const visibleStateWidth = stateImporting?.clientWidth || stateProduct?.clientWidth || stateNoProduct?.clientWidth || 0;
+      const popupStateWidth = Math.floor(visibleStateWidth > 0 ? visibleStateWidth : (document.body.clientWidth - 40));
+      const framePadding = 28; // .qr-frame horizontal padding (14 + 14)
+      const maxDrawableSize = Math.max(200, popupStateWidth - framePadding);
+      const effectiveTarget = Math.min(targetSize, maxDrawableSize);
+      const modulePixelSize = Math.max(5, Math.floor(effectiveTarget / totalModules));
       const qrSize = totalModules * modulePixelSize;
       const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
@@ -213,6 +218,12 @@
         }
       }
 
+      const frame = canvas.closest(".qr-frame");
+      if (frame) {
+        frame.style.width = `${qrSize + framePadding}px`;
+        frame.style.maxWidth = "100%";
+      }
+
       showState(stateQr);
       setImportState(ImportStates.qr);
     } catch (err) {
@@ -224,6 +235,14 @@
   function normalizeQrValue(value) {
     if (value == null) return "";
     return String(value).trim();
+  }
+
+  function getQrDebugPayload() {
+    try {
+      return normalizeQrValue(localStorage.getItem("genshot.tryon.qrTestPayload"));
+    } catch {
+      return "";
+    }
   }
 
   function buildScannerPayload(sid) {
@@ -333,17 +352,17 @@
     try {
       // Prepare the item payload
       const item = {
-        name: currentProduct.name,
-        brand: currentProduct.brand,
-        category: currentProduct.category,
-        price: currentProduct.price,
-        currency: currentProduct.currency,
-        color: currentProduct.color,
-        material: currentProduct.material,
-        sizes: currentProduct.sizes,
-        images: currentProduct.images,
-        productUrl: currentProduct.productUrl,
-        sizeChart: currentProduct.sizeChart,
+        name: typeof currentProduct.name === "string" && currentProduct.name.trim() ? currentProduct.name.trim() : "Unknown Item",
+        brand: typeof currentProduct.brand === "string" ? currentProduct.brand.trim() : "",
+        category: typeof currentProduct.category === "string" && currentProduct.category.trim() ? currentProduct.category.trim() : "top",
+        price: Number.isFinite(Number(currentProduct.price)) ? Number(currentProduct.price) : null,
+        currency: typeof currentProduct.currency === "string" && currentProduct.currency.trim() ? currentProduct.currency.trim() : "USD",
+        color: typeof currentProduct.color === "string" ? currentProduct.color.trim() : "",
+        material: typeof currentProduct.material === "string" ? currentProduct.material.trim() : "",
+        sizes: Array.isArray(currentProduct.sizes) ? currentProduct.sizes : [],
+        images: Array.isArray(currentProduct.images) ? currentProduct.images.filter((img) => typeof img === "string" && img.trim()) : [],
+        productUrl: typeof currentProduct.productUrl === "string" ? currentProduct.productUrl.trim() : "",
+        sizeChart: Array.isArray(currentProduct.sizeChart) ? currentProduct.sizeChart : [],
       };
 
       // Send to service worker to create the import session
@@ -353,10 +372,14 @@
       });
 
       if (response?.success && response.data) {
-        const qrUrl = resolveQrPayload(response.data);
+        const debugPayload = getQrDebugPayload();
+        const qrUrl = debugPayload || resolveQrPayload(response.data);
         if (!qrUrl) {
           showError("Backend returned invalid session data");
           return;
+        }
+        if (debugPayload) {
+          console.info("[GenShot TryOn] QR test payload override active:", debugPayload);
         }
         renderQrCode(qrUrl);
       } else {
