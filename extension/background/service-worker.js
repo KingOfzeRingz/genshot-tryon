@@ -56,7 +56,6 @@ const CONTENT_SCRIPTS = [
   "content/extractors/generic.js",
   "content/image-selector.js",
   "content/content-script.js",
-  "lib/qrcode.min.js",
   "content/overlay-styles.js",
   "content/inject-button.js",
 ];

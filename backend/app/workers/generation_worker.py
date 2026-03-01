@@ -20,22 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 async def run_generation(generation_id: str) -> None:
-    """Execute the full generation pipeline for *generation_id*.
-
-    Steps
-    -----
-    1. Mark generation as ``processing``.
-    2. Fetch user profile, items, and body vector.
-    3. Score fit for each item.
-    4. Generate try-on images.
-    5. Store results and mark as ``completed``.
-    6. On any error, mark as ``failed``.
-    """
+    """Execute the full generation pipeline for *generation_id*."""
     logger.info("Starting generation worker for %s", generation_id)
 
     try:
-        # ── 1. Mark processing ────────────────────────────────────────
-        db.update_generation(generation_id, {"status": "processing"})
+        db.update_generation(generation_id, {"status": "processing", "stage": "preparing"})
 
         gen_data = db.get_generation(generation_id)
         if gen_data is None:
@@ -46,8 +35,8 @@ async def run_generation(generation_id: str) -> None:
         item_ids: list = gen_data.get("item_ids", [])
         body_vector_raw: dict = gen_data.get("body_vector", {})
         reference_photo_url: str = gen_data.get("reference_photo_url", "")
+        final_angles: list[str] = gen_data.get("final_angles") or ["front", "profile", "three_quarter", "back"]
 
-        # ── 2. Fetch user profile ─────────────────────────────────────
         user_data = db.get_user(user_id)
         if user_data is None:
             raise ValueError(f"User {user_id} not found in Firestore.")
@@ -63,17 +52,15 @@ async def run_generation(generation_id: str) -> None:
             core_image_url=user_data.get("core_image_url"),
         )
 
-        # Prefer the core image (studio shot in white clothes) for try-on
-        # generation; fall back to raw reference photo if core isn't ready.
         if user_profile.core_image_url:
             user_profile.reference_photo_url = user_profile.core_image_url
             logger.info("Using core image for generation %s", generation_id)
         elif not user_profile.reference_photo_url:
             user_profile.reference_photo_url = reference_photo_url
+
         if not user_profile.reference_photo_url:
             raise ValueError("No reference photo available for user.")
 
-        # ── 3. Fetch items ────────────────────────────────────────────
         items: list[Item] = []
         for iid in item_ids:
             item_data = db.get_item(user_id, iid)
@@ -85,49 +72,80 @@ async def run_generation(generation_id: str) -> None:
         if not items:
             raise ValueError("None of the requested items were found.")
 
-        # ── 4. Build body vector ──────────────────────────────────────
         body_vector = BodyVector(**body_vector_raw)
 
-        # ── 5. Fit scoring ────────────────────────────────────────────
+        db.update_generation(generation_id, {"stage": "fit_analysis"})
         fit_scores = []
         for item in items:
             fs = score_fit(body_vector, item)
             fit_scores.append(fs.model_dump())
             logger.info(
                 "Fit score for item %s (%s): %d -- recommended size %s",
-                item.id, item.name, fs.overall, fs.recommended_size,
+                item.id,
+                item.name,
+                fs.overall,
+                fs.recommended_size,
             )
 
-        # ── 6. Image generation ───────────────────────────────────────
-        image_urls = await generate_tryon_images(user_profile, items, body_vector)
+        db.update_generation(generation_id, {"stage": "reference_gen"})
 
-        # ── 7. Persist results ────────────────────────────────────────
-        if not image_urls:
-            db.update_generation(generation_id, {
-                "status": "failed",
-                "images": [],
-                "fit_scores": fit_scores,
-                "error_message": "No try-on images were generated.",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            })
-            logger.error("Generation %s failed: no images were generated.", generation_id)
+        image_bundle = await generate_tryon_images(
+            user_profile,
+            items,
+            body_vector,
+            final_angles=final_angles,
+        )
+
+        final_image_urls = image_bundle.get("final_image_urls", [])
+        if not final_image_urls:
+            db.update_generation(
+                generation_id,
+                {
+                    "status": "failed",
+                    "images": [],
+                    "fit_scores": fit_scores,
+                    "internal_reference_images": image_bundle.get("internal_reference_images", []),
+                    "final_images": image_bundle.get("final_images", []),
+                    "generation_context": {
+                        "body_vector_used": image_bundle.get("body_vector_used", {}),
+                        "final_angles": final_angles,
+                    },
+                    "error_message": "No try-on images were generated.",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            logger.error("Generation %s failed: no final images were generated.", generation_id)
             return
 
-        db.update_generation(generation_id, {
-            "status": "completed",
-            "images": image_urls,
-            "fit_scores": fit_scores,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info("Generation %s completed with %d images.", generation_id, len(image_urls))
+        db.update_generation(
+            generation_id,
+            {
+                "status": "completed",
+                "stage": "finalized",
+                "images": final_image_urls,
+                "internal_reference_images": image_bundle.get("internal_reference_images", []),
+                "final_images": image_bundle.get("final_images", []),
+                "generation_context": {
+                    "body_vector_used": image_bundle.get("body_vector_used", {}),
+                    "final_angles": image_bundle.get("final_angles", final_angles),
+                    "internal_reference_angles": ["front", "profile"],
+                },
+                "fit_scores": fit_scores,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        logger.info("Generation %s completed with %d images.", generation_id, len(final_image_urls))
 
     except Exception as exc:
         logger.error("Generation %s failed: %s\n%s", generation_id, exc, traceback.format_exc())
         try:
-            db.update_generation(generation_id, {
-                "status": "failed",
-                "error_message": str(exc),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            })
+            db.update_generation(
+                generation_id,
+                {
+                    "status": "failed",
+                    "error_message": str(exc),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         except Exception as db_exc:
             logger.error("Could not update failed generation %s: %s", generation_id, db_exc)

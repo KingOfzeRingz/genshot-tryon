@@ -42,22 +42,22 @@ var GENSHOT_OVERLAY_CSS = `
   padding: 12px 22px;
   border: none;
   border-radius: 50px;
-  background: #0088FF;
+  background: #1A1A1A;
   color: #FFFFFF;
   font-family: inherit;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 20px rgba(0, 136, 255, 0.35),
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2),
               0 2px 6px rgba(0, 0, 0, 0.08);
   transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
   user-select: none;
 }
 
 .gs-fab:hover {
-  background: #0077E6;
+  background: #333333;
   transform: translateY(-2px);
-  box-shadow: 0 6px 24px rgba(0, 136, 255, 0.45),
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3),
               0 3px 8px rgba(0, 0, 0, 0.1);
 }
 
@@ -143,9 +143,10 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-modal-logo-icon {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 18px;
   flex-shrink: 0;
+  color: #1A1A1A;
 }
 
 .gs-modal-logo-text {
@@ -189,7 +190,7 @@ var GENSHOT_OVERLAY_CSS = `
   padding: 14px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(199, 199, 199, 0.4);
-  border-radius: 16px;
+  border-radius: 22px;
   margin-bottom: 16px;
 }
 
@@ -222,7 +223,7 @@ var GENSHOT_OVERLAY_CSS = `
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #0088FF;
+  color: #1A1A1A;
 }
 
 .gs-product-name {
@@ -267,8 +268,8 @@ var GENSHOT_OVERLAY_CSS = `
   width: 100%;
   padding: 13px 20px;
   border: none;
-  border-radius: 14px;
-  background: #0088FF;
+  border-radius: 18px;
+  background: #1A1A1A;
   color: #FFFFFF;
   font-family: inherit;
   font-size: 15px;
@@ -278,7 +279,7 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-btn-primary:hover {
-  background: #0077E6;
+  background: #333333;
 }
 
 .gs-btn-primary:active {
@@ -286,7 +287,7 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 .gs-btn-primary:disabled {
-  background: rgba(0, 136, 255, 0.4);
+  background: rgba(26, 26, 26, 0.35);
   cursor: not-allowed;
   transform: none;
 }
@@ -297,7 +298,7 @@ var GENSHOT_OVERLAY_CSS = `
   justify-content: center;
   padding: 8px 20px;
   border: 1px solid rgba(199, 199, 199, 0.5);
-  border-radius: 10px;
+  border-radius: 14px;
   background: #FFFFFF;
   color: #1A1A1A;
   font-family: inherit;
@@ -328,7 +329,7 @@ var GENSHOT_OVERLAY_CSS = `
   width: 28px;
   height: 28px;
   border: 2.5px solid rgba(199, 199, 199, 0.35);
-  border-top-color: #0088FF;
+  border-top-color: #1A1A1A;
   border-radius: 50%;
   animation: gs-spin 0.7s linear infinite;
 }
@@ -344,9 +345,9 @@ var GENSHOT_OVERLAY_CSS = `
 }
 
 /* ============================
-   QR Code Section
+   Import Code Section
    ============================ */
-.gs-qr-section {
+.gs-code-section {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -354,7 +355,7 @@ var GENSHOT_OVERLAY_CSS = `
   gap: 16px;
 }
 
-.gs-qr-badge {
+.gs-code-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -367,32 +368,52 @@ var GENSHOT_OVERLAY_CSS = `
   color: #1DA371;
 }
 
-.gs-qr-canvas {
-  width: auto;
-  height: auto;
-  display: block;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-  transform: none !important;
-  filter: none !important;
-}
-
-.gs-qr-frame {
+.gs-code-digits {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 48px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: #1A1A1A;
+  padding: 16px 24px;
   background: #FFFFFF;
-  border-radius: 10px;
-  padding: 14px;
   border: 1px solid rgba(199, 199, 199, 0.35);
+  border-radius: 14px;
+  text-align: center;
+  user-select: all;
 }
 
-.gs-qr-instruction {
+.gs-code-digits.gs-code-expired {
+  color: rgba(26, 26, 26, 0.25);
+}
+
+.gs-code-countdown {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(26, 26, 26, 0.45);
+}
+
+.gs-code-countdown.gs-code-expired {
+  color: #DC5A5A;
+}
+
+.gs-code-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.gs-hidden-el {
+  display: none !important;
+}
+
+.gs-code-instruction {
   font-size: 13px;
   color: rgba(26, 26, 26, 0.5);
   text-align: center;
   line-height: 1.6;
 }
 
-.gs-qr-instruction strong {
-  color: #0088FF;
+.gs-code-instruction strong {
+  color: #1A1A1A;
   font-weight: 600;
 }
 

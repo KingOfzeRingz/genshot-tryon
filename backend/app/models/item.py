@@ -51,6 +51,12 @@ class ImportSessionClaim(BaseModel):
     pass
 
 
+class ImportCodeClaim(BaseModel):
+    """Body for claiming a session by 4-digit code."""
+
+    code: str = Field(..., min_length=4, max_length=4, pattern=r"^\d{4}$")
+
+
 class ImportSession(BaseModel):
     """Persisted import session."""
 

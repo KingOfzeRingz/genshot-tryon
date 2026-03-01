@@ -27,18 +27,21 @@ var GenShotImageSelector = (function () {
    */
   function scoreZara(url) {
     var score = 0;
+    var lower = url.toLowerCase();
 
     // E-commerce flat-lay shots — best for try-on
     if (/-e\d/i.test(url)) {
       score += 40;
       // Prefer the canonical first shot (-e1)
-      if (/-e1/i.test(url)) score += 5;
+      if (/-e1/i.test(url)) score += 10;
+      else if (/-e2/i.test(url)) score += 5;
     }
     // Packshot (product on plain background)
     else if (/-p\d/i.test(url)) {
       score += 30;
+      if (/-p1/i.test(url)) score += 5;
     }
-    // Model / atmosphere shots
+    // Model / atmosphere shots — deprioritize
     else if (/-a\d/i.test(url)) {
       score -= 10;
     }
@@ -47,24 +50,51 @@ var GenShotImageSelector = (function () {
     var wMatch = url.match(/[?&]w=(\d+)/);
     if (wMatch) {
       var w = parseInt(wMatch[1], 10);
-      // Normalise: +0-10 points based on width (563 common max)
-      score += Math.min(10, Math.round(w / 60));
+      // +0-15 points based on width (prefer 800+ px)
+      score += Math.min(15, Math.round(w / 60));
     }
+
+    // Penalize thumbnails
+    if (/thumb|_s\.|_xs\.|mini|icon/i.test(lower)) score -= 30;
+
+    // Penalize non-product images (logos, banners, etc)
+    if (/logo|banner|sprite|placeholder|loading/i.test(lower)) score -= 50;
 
     return score;
   }
 
   /**
    * Score a single image URL using H&M-specific heuristics.
+   *
+   * H&M CDN URLs often look like:
+   *   https://lp2.hm.com/hmgoepprod?set=format[webp],quality[79],source[/xx/yy/id.jpg]&call=url[file:/product/main]
+   *   The `call=url[file:/product/...]` part indicates the image type.
    */
   function scoreHM(url) {
     var score = 0;
     var lower = url.toLowerCase();
 
+    // H&M CDN call-type signals
+    if (/call=url\[file:\/product\/main\]/.test(lower)) score += 35;
+    if (/call=url\[file:\/product\/style\]/.test(lower)) score += 25;
+    if (/call=url\[file:\/product\/listing\]/.test(lower)) score += 15;
+
+    // Filename/path keyword signals
     if (/product|flat|still|packshot/.test(lower)) score += 30;
-    if (/main|primary/.test(lower)) score += 20;
-    if (/model|look|outfit/.test(lower)) score -= 15;
-    if (/thumb|mini|icon/.test(lower)) score -= 20;
+    if (/main|primary|hero/.test(lower)) score += 20;
+    if (/front|detail/.test(lower)) score += 10;
+
+    // Negative signals
+    if (/model|look|outfit|environment/.test(lower)) score -= 15;
+    if (/thumb|mini|icon|tiny/.test(lower)) score -= 25;
+    if (/logo|banner|sprite|placeholder|loading/i.test(lower)) score -= 50;
+
+    // Prefer larger images (check w= param)
+    var wMatch = lower.match(/[?&]w=(\d+)/);
+    if (wMatch) {
+      var w = parseInt(wMatch[1], 10);
+      score += Math.min(15, Math.round(w / 80));
+    }
 
     return score;
   }
@@ -77,12 +107,26 @@ var GenShotImageSelector = (function () {
     var lower = url.toLowerCase();
 
     // Positive signals
-    if (/product|main|primary|hero|large|detail/.test(lower)) score += 20;
-    if (/flat|still|front/.test(lower)) score += 15;
+    if (/product|main|primary|hero|large|detail|full/.test(lower)) score += 20;
+    if (/flat|still|front|packshot/.test(lower)) score += 15;
 
     // Negative signals
-    if (/thumb|small|icon|logo|banner|sprite/.test(lower)) score -= 25;
-    if (/model|lifestyle|look|outfit/.test(lower)) score -= 10;
+    if (/thumb|small|icon|logo|banner|sprite|placeholder|loading/.test(lower)) score -= 30;
+    if (/model|lifestyle|look|outfit|environment/.test(lower)) score -= 10;
+    if (/swatch|color-chip|favicon/.test(lower)) score -= 40;
+
+    // Prefer larger images
+    var wMatch = lower.match(/[?&](?:w|width)=(\d+)/);
+    if (wMatch) {
+      var w = parseInt(wMatch[1], 10);
+      score += Math.min(15, Math.round(w / 80));
+    }
+
+    // Penalize very small images by filename clues (e.g., _100x100)
+    if (/\d{2,3}x\d{2,3}/.test(lower)) {
+      var dims = lower.match(/(\d{2,3})x(\d{2,3})/);
+      if (dims && parseInt(dims[1], 10) < 200) score -= 20;
+    }
 
     return score;
   }

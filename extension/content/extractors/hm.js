@@ -83,6 +83,42 @@ var HMExtractor = (function () {
   }
 
   /**
+   * Parse a price string, handling US (1,299.99) and EU (1.299,99) formats.
+   */
+  function parsePriceText(text) {
+    const match = text.match(
+      /\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}|\d+/
+    );
+    if (!match) return null;
+    let num = match[0];
+    if (/\.\d{3}/.test(num) && num.includes(",")) {
+      num = num.replace(/\./g, "").replace(",", ".");
+    } else if (/^\d+,\d{1,2}$/.test(num)) {
+      num = num.replace(",", ".");
+    } else {
+      num = num.replace(/,/g, "");
+    }
+    const val = parseFloat(num);
+    return isNaN(val) ? null : val;
+  }
+
+  /**
+   * Detect currency from text containing a price.
+   */
+  function detectCurrency(text) {
+    if (text.includes("$")) return "USD";
+    if (text.includes("\u20AC")) return "EUR";
+    if (text.includes("\u00A3")) return "GBP";
+    if (/\bkr\.?\b/i.test(text)) return "SEK";
+    if (text.includes("\u20BD")) return "RUB";
+    if (text.includes("\u00A5")) return "JPY";
+    const lang = document.documentElement.lang || "";
+    if (lang.startsWith("sv")) return "SEK";
+    if (lang.startsWith("de") || lang.startsWith("fr") || lang.startsWith("it")) return "EUR";
+    return null;
+  }
+
+  /**
    * Extract price and currency.
    */
   function extractPrice(jsonLd) {
@@ -90,19 +126,29 @@ var HMExtractor = (function () {
 
     // Try JSON-LD first
     if (jsonLd?.offers) {
-      const offer = Array.isArray(jsonLd.offers)
-        ? jsonLd.offers[0]
-        : jsonLd.offers;
-      if (offer.price) {
-        result.price = parseFloat(offer.price);
-        result.currency = offer.priceCurrency || null;
+      const offers = Array.isArray(jsonLd.offers) ? jsonLd.offers : [jsonLd.offers];
+      // Prefer the lowest current price (sale price)
+      let best = null;
+      for (const offer of offers) {
+        if (offer.price != null) {
+          const p = parseFloat(offer.price);
+          if (!isNaN(p) && (best === null || p < best)) best = p;
+          result.currency = offer.priceCurrency || result.currency;
+        }
+      }
+      if (best !== null) {
+        result.price = best;
         return result;
       }
     }
 
-    // DOM fallback
+    // DOM fallback — prefer "current" / "sale" selectors
     const priceSelectors = [
+      '[data-testid="product-price"] [class*="sale"]',
+      '[data-testid="product-price"] [class*="current"]',
       '[data-testid="product-price"]',
+      '[class*="ProductPrice"] [class*="sale"]',
+      '[class*="ProductPrice"] [class*="red"]',
       '[class*="ProductPrice"]',
       '.product-item-price span',
       '[class*="product-price"]',
@@ -114,13 +160,10 @@ var HMExtractor = (function () {
       const el = document.querySelector(selector);
       if (el) {
         const text = el.textContent.trim();
-        const match = text.match(/[\d]+[.,]?\d*/);
-        if (match) {
-          result.price = parseFloat(match[0].replace(",", "."));
-          if (text.includes("$")) result.currency = "USD";
-          else if (text.includes("\u20AC")) result.currency = "EUR";
-          else if (text.includes("\u00A3")) result.currency = "GBP";
-          else if (text.includes("kr")) result.currency = "SEK";
+        const parsed = parsePriceText(text);
+        if (parsed !== null) {
+          result.price = parsed;
+          result.currency = detectCurrency(text);
           return result;
         }
       }
@@ -139,6 +182,57 @@ var HMExtractor = (function () {
   }
 
   /**
+   * Pick the largest image from a srcset string.
+   */
+  function bestFromSrcset(srcset) {
+    if (!srcset) return null;
+    let best = null;
+    let bestW = 0;
+    srcset.split(",").forEach((entry) => {
+      const parts = entry.trim().split(/\s+/);
+      const url = parts[0];
+      const descriptor = parts[1] || "";
+      const w = parseInt(descriptor, 10) || 0;
+      if (!best || w > bestW) {
+        best = url;
+        bestW = w;
+      }
+    });
+    return best;
+  }
+
+  /**
+   * Normalize an image URL and upgrade H&M CDN to high resolution.
+   */
+  function normalizeImageUrl(src) {
+    if (!src || src.includes("data:image") || src.includes("placeholder")) return null;
+    if (src.startsWith("//")) src = "https:" + src;
+    else if (src.startsWith("/")) src = window.location.origin + src;
+    // Upgrade H&M CDN width parameter to high-res
+    src = src.replace(/([?&])w=\d+/, "$1w=1200");
+    // If using set= format, upgrade quality and width
+    src = src.replace(/quality\[\d+\]/, "quality[90]");
+    return src;
+  }
+
+  /**
+   * Remove duplicate images that differ only in size params.
+   */
+  function deduplicateByBase(urls) {
+    const seen = new Map();
+    for (const url of urls) {
+      const base = url
+        .replace(/[?&](w|width|h|height|size|quality)=[^&]*/g, "")
+        .replace(/quality\[\d+\]/, "")
+        .replace(/\?$/, "");
+      if (!seen.has(base)) {
+        seen.set(base, url);
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /**
    * Extract product images.
    */
   function extractImages(jsonLd) {
@@ -151,17 +245,20 @@ var HMExtractor = (function () {
         : [jsonLd.image];
       ldImages.forEach((img) => {
         const src = typeof img === "string" ? img : img?.url || img?.contentUrl;
-        if (src) images.add(src);
+        const normalized = normalizeImageUrl(src);
+        if (normalized) images.add(normalized);
       });
     }
 
-    // DOM images
+    // DOM images — collect from all selectors, prefer srcset for high-res
     const imgSelectors = [
       '[data-testid="product-image"] img',
       '.product-detail-main-image-container img',
       '[class*="ProductImage"] img',
       '[class*="product-image"] img',
       '.product-media img',
+      'picture source[type="image/jpeg"]',
+      'picture source[type="image/webp"]',
       'img[src*="lp2.hm.com"]',
       'img[src*="image.hm.com"]',
       'img[src*="hmgroup"]',
@@ -169,12 +266,17 @@ var HMExtractor = (function () {
 
     for (const selector of imgSelectors) {
       document.querySelectorAll(selector).forEach((el) => {
-        let src = el.getAttribute("src") || el.getAttribute("data-src");
-        if (src && !src.includes("data:image") && !src.includes("placeholder")) {
-          if (src.startsWith("//")) src = "https:" + src;
-          else if (src.startsWith("/")) src = window.location.origin + src;
-          images.add(src);
+        let src;
+        if (el.tagName === "SOURCE") {
+          src = bestFromSrcset(el.getAttribute("srcset"));
+        } else {
+          src = bestFromSrcset(el.getAttribute("srcset"))
+            || bestFromSrcset(el.getAttribute("data-srcset"))
+            || el.getAttribute("src")
+            || el.getAttribute("data-src");
         }
+        src = normalizeImageUrl(src);
+        if (src) images.add(src);
       });
     }
 
@@ -182,12 +284,12 @@ var HMExtractor = (function () {
     if (images.size === 0) {
       const ogImage = document.querySelector('meta[property="og:image"]');
       if (ogImage) {
-        const src = ogImage.getAttribute("content");
+        const src = normalizeImageUrl(ogImage.getAttribute("content"));
         if (src) images.add(src);
       }
     }
 
-    return [...images];
+    return deduplicateByBase([...images]);
   }
 
   /**
@@ -347,12 +449,30 @@ var HMExtractor = (function () {
   }
 
   /**
-   * Infer category from breadcrumb or URL path.
+   * Try to map a text string to one of: tshirt, pants, jacket, sneakers.
+   * Returns null if no confident match.
+   */
+  function normalizeCategory(raw) {
+    if (!raw) return null;
+    const s = raw.toLowerCase();
+    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho)\b/.test(s)) return "jacket";
+    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "pants";
+    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "sneakers";
+    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank)\b/.test(s)) return "tshirt";
+    return null;
+  }
+
+  /**
+   * Infer category from JSON-LD, breadcrumbs, product name, and URL path.
    */
   function extractCategory(jsonLd) {
-    if (jsonLd?.category) return jsonLd.category;
+    // 1. Try JSON-LD category
+    if (jsonLd?.category) {
+      const cat = normalizeCategory(jsonLd.category);
+      if (cat) return cat;
+    }
 
-    // Try breadcrumbs
+    // 2. Try breadcrumbs
     const breadcrumbSelectors = [
       '[class*="breadcrumb"] a',
       'nav[aria-label*="breadcrumb"] a',
@@ -362,31 +482,22 @@ var HMExtractor = (function () {
     for (const selector of breadcrumbSelectors) {
       const links = document.querySelectorAll(selector);
       if (links.length > 1) {
-        const category = links[links.length - 1]?.textContent.trim();
-        if (category) return category;
+        const text = links[links.length - 1]?.textContent.trim();
+        const cat = normalizeCategory(text);
+        if (cat) return cat;
       }
     }
 
-    // Infer from URL
-    const path = window.location.pathname.toLowerCase();
-    const categoryPatterns = [
-      { pattern: /dress/i, category: "Dresses" },
-      { pattern: /shirt|blouse|top/i, category: "Tops" },
-      { pattern: /trouser|pant|jean/i, category: "Bottoms" },
-      { pattern: /jacket|coat|blazer/i, category: "Outerwear" },
-      { pattern: /skirt/i, category: "Skirts" },
-      { pattern: /shoe|boot|sandal|sneaker/i, category: "Shoes" },
-      { pattern: /bag|purse/i, category: "Bags" },
-      { pattern: /knit|sweater|cardigan/i, category: "Knitwear" },
-      { pattern: /t-shirt|tee/i, category: "T-Shirts" },
-      { pattern: /hoodie|sweatshirt/i, category: "Sweatshirts" },
-    ];
+    // 3. Try product name (from JSON-LD or DOM)
+    const name = extractName(jsonLd);
+    const fromName = normalizeCategory(name);
+    if (fromName) return fromName;
 
-    for (const { pattern, category } of categoryPatterns) {
-      if (pattern.test(path)) return category;
-    }
+    // 4. Try URL path
+    const fromUrl = normalizeCategory(window.location.pathname);
+    if (fromUrl) return fromUrl;
 
-    return "Clothing";
+    return "tshirt";
   }
 
   /**

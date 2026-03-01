@@ -25,6 +25,50 @@ var ZaraExtractor = (function () {
   }
 
   /**
+   * Parse a price string, handling US (1,299.99) and EU (1.299,99) formats.
+   */
+  function parsePriceText(text) {
+    // Match price-like numbers: 1,299.99 | 1.299,99 | 29.99 | 29,99 | 1299
+    const match = text.match(
+      /\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}|\d+/
+    );
+    if (!match) return null;
+    let num = match[0];
+    // EU thousands (1.234,56) — period groups, comma decimal
+    if (/\.\d{3}/.test(num) && num.includes(",")) {
+      num = num.replace(/\./g, "").replace(",", ".");
+    }
+    // Simple comma-as-decimal (29,99)
+    else if (/^\d+,\d{1,2}$/.test(num)) {
+      num = num.replace(",", ".");
+    }
+    // US thousands (1,299.99) or clean (29.99)
+    else {
+      num = num.replace(/,/g, "");
+    }
+    const val = parseFloat(num);
+    return isNaN(val) ? null : val;
+  }
+
+  /**
+   * Detect currency from a text string containing a price.
+   */
+  function detectCurrency(text) {
+    if (text.includes("$")) return "USD";
+    if (text.includes("\u20AC")) return "EUR";
+    if (text.includes("\u00A3")) return "GBP";
+    if (text.includes("\u20BD")) return "RUB";
+    if (/\bkr\b/i.test(text)) return "SEK";
+    if (text.includes("\u00A5")) return "JPY";
+    if (text.includes("\u20A9")) return "KRW";
+    // Try HTML lang for additional hints
+    const lang = document.documentElement.lang || "";
+    if (lang.startsWith("de") || lang.startsWith("fr") || lang.startsWith("it")) return "EUR";
+    if (lang.startsWith("ja")) return "JPY";
+    return null;
+  }
+
+  /**
    * Extract the product name.
    */
   function extractName() {
@@ -72,11 +116,12 @@ var ZaraExtractor = (function () {
       }
     }
 
-    // Try DOM selectors
+    // Try DOM selectors — prefer "current" / "sale" price over original
     const priceSelectors = [
       '[class*="price__amount"] [class*="current"]',
       '.price__amount--current',
       '[class*="product-price"] [class*="current"]',
+      '[class*="price"] [class*="sale"]',
       '[data-qa="product-price"]',
       '.money-amount__main',
       '[class*="price"] [class*="amount"]',
@@ -87,14 +132,10 @@ var ZaraExtractor = (function () {
       const el = document.querySelector(selector);
       if (el) {
         const text = el.textContent.trim();
-        const match = text.match(/[\d]+[.,]?\d*/);
-        if (match) {
-          result.price = parseFloat(match[0].replace(",", "."));
-          // Try to detect currency
-          if (text.includes("$")) result.currency = "USD";
-          else if (text.includes("\u20AC")) result.currency = "EUR";
-          else if (text.includes("\u00A3")) result.currency = "GBP";
-          else if (text.includes("\u20BD")) result.currency = "RUB";
+        const parsed = parsePriceText(text);
+        if (parsed !== null) {
+          result.price = parsed;
+          result.currency = detectCurrency(text);
           return result;
         }
       }
@@ -115,48 +156,98 @@ var ZaraExtractor = (function () {
   /**
    * Extract product images from the gallery.
    */
+  /**
+   * Pick the largest image from a srcset string.
+   */
+  function bestFromSrcset(srcset) {
+    if (!srcset) return null;
+    let best = null;
+    let bestW = 0;
+    srcset.split(",").forEach((entry) => {
+      const parts = entry.trim().split(/\s+/);
+      const url = parts[0];
+      const descriptor = parts[1] || "";
+      const w = parseInt(descriptor, 10) || 0;
+      if (!best || w > bestW) {
+        best = url;
+        bestW = w;
+      }
+    });
+    return best;
+  }
+
+  /**
+   * Normalize an image URL to absolute and upgrade to a higher resolution.
+   */
+  function normalizeImageUrl(src) {
+    if (!src || src.includes("data:image") || src.includes("placeholder")) return null;
+    if (src.startsWith("//")) src = "https:" + src;
+    else if (src.startsWith("/")) src = window.location.origin + src;
+    // Upgrade Zara CDN to larger width if it has a w= param
+    src = src.replace(/([?&])w=\d+/, "$1w=1920");
+    return src;
+  }
+
   function extractImages() {
     const images = new Set();
 
-    // Try gallery/carousel images
+    // Try gallery/carousel images — collect from ALL matching selectors
     const imgSelectors = [
       '.media-image img',
       '.product-detail-images img',
       '[class*="product-media"] img',
       '[class*="gallery"] img',
       'picture source[type="image/jpeg"]',
+      'picture source[type="image/webp"]',
       'picture img',
       '.product-detail-view img[src*="static.zara.net"]',
+      'img[src*="static.zara.net"]',
     ];
 
     for (const selector of imgSelectors) {
       document.querySelectorAll(selector).forEach((el) => {
         let src;
         if (el.tagName === "SOURCE") {
-          src = el.getAttribute("srcset")?.split(",")[0]?.trim()?.split(" ")[0];
+          // Pick the largest from srcset
+          src = bestFromSrcset(el.getAttribute("srcset"));
         } else {
-          src = el.getAttribute("src") || el.getAttribute("data-src");
+          // Prefer srcset > data-srcset > src > data-src
+          src = bestFromSrcset(el.getAttribute("srcset"))
+            || bestFromSrcset(el.getAttribute("data-srcset"))
+            || el.getAttribute("src")
+            || el.getAttribute("data-src");
         }
-        if (src && !src.includes("data:image") && !src.includes("placeholder")) {
-          // Normalize to full URL
-          if (src.startsWith("//")) src = "https:" + src;
-          else if (src.startsWith("/")) src = window.location.origin + src;
-          images.add(src);
-        }
+        src = normalizeImageUrl(src);
+        if (src) images.add(src);
       });
-      if (images.size > 0) break;
     }
 
     // Fallback: OG image
     if (images.size === 0) {
       const ogImage = document.querySelector('meta[property="og:image"]');
       if (ogImage) {
-        const src = ogImage.getAttribute("content");
+        const src = normalizeImageUrl(ogImage.getAttribute("content"));
         if (src) images.add(src);
       }
     }
 
-    return [...images];
+    // Deduplicate by base path (same image at different widths)
+    return deduplicateByBase([...images]);
+  }
+
+  /**
+   * Remove duplicate images that differ only in size params.
+   */
+  function deduplicateByBase(urls) {
+    const seen = new Map();
+    for (const url of urls) {
+      // Strip common size query params for comparison
+      const base = url.replace(/[?&](w|width|h|height|size|quality)=[^&]*/g, "").replace(/\?$/, "");
+      if (!seen.has(base)) {
+        seen.set(base, url);
+      }
+    }
+    return [...seen.values()];
   }
 
   /**
@@ -301,10 +392,24 @@ var ZaraExtractor = (function () {
   }
 
   /**
-   * Infer category from breadcrumb or URL path.
+   * Try to map a text string to one of: tshirt, pants, jacket, sneakers.
+   * Returns null if no confident match.
+   */
+  function normalizeCategory(raw) {
+    if (!raw) return null;
+    const s = raw.toLowerCase();
+    if (/\b(jacket|coat|blazer|parka|puffer|anorak|outerwear|overcoat|trench|windbreaker|gilet|vest(?:e)?|cape|poncho)\b/.test(s)) return "jacket";
+    if (/\b(trouser|pant|jean|skirt|short(?!s?\s*sleeve)|legging|bottom|chino|jogger|cargo|culottes|bermuda)\b/.test(s)) return "pants";
+    if (/\b(shoe|boot|sandal|sneaker|trainer|loafer|heel|slipper|mule|clog|footwear|espadrille|oxford|derby|pump)\b/.test(s)) return "sneakers";
+    if (/\b(shirt|blouse|top|dress|knit|sweater|cardigan|hoodie|sweatshirt|t-shirt|tee|polo|crop|tunic|camisole|bodysuit|jumpsuit|romper|pullover|jersey|henley|tank)\b/.test(s)) return "tshirt";
+    return null;
+  }
+
+  /**
+   * Infer category from breadcrumbs, product name, and URL path.
    */
   function extractCategory() {
-    // Try breadcrumbs
+    // 1. Try breadcrumbs
     const breadcrumbSelectors = [
       '[class*="breadcrumb"] a',
       '[class*="product-path"] a',
@@ -314,31 +419,22 @@ var ZaraExtractor = (function () {
     for (const selector of breadcrumbSelectors) {
       const links = document.querySelectorAll(selector);
       if (links.length > 1) {
-        // Take the second-to-last breadcrumb as category
-        const category = links[links.length - 1]?.textContent.trim();
-        if (category) return category;
+        const text = links[links.length - 1]?.textContent.trim();
+        const cat = normalizeCategory(text);
+        if (cat) return cat;
       }
     }
 
-    // Infer from URL
-    const path = window.location.pathname.toLowerCase();
-    const categoryPatterns = [
-      { pattern: /dress/i, category: "Dresses" },
-      { pattern: /shirt|blouse/i, category: "Tops" },
-      { pattern: /trouser|pant|jean/i, category: "Bottoms" },
-      { pattern: /jacket|coat|blazer/i, category: "Outerwear" },
-      { pattern: /skirt/i, category: "Skirts" },
-      { pattern: /shoe|boot|sandal|sneaker/i, category: "Shoes" },
-      { pattern: /bag|purse/i, category: "Bags" },
-      { pattern: /knit|sweater|cardigan/i, category: "Knitwear" },
-      { pattern: /t-shirt|tee/i, category: "T-Shirts" },
-    ];
+    // 2. Try product name
+    const name = extractName();
+    const fromName = normalizeCategory(name);
+    if (fromName) return fromName;
 
-    for (const { pattern, category } of categoryPatterns) {
-      if (pattern.test(path)) return category;
-    }
+    // 3. Try URL path
+    const fromUrl = normalizeCategory(window.location.pathname);
+    if (fromUrl) return fromUrl;
 
-    return "Clothing";
+    return "tshirt";
   }
 
   /**

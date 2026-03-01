@@ -35,7 +35,10 @@
   const btnImport = document.getElementById("btn-import");
   const btnRetry = document.getElementById("btn-retry");
 
-  const qrCanvas = document.getElementById("qr-canvas");
+  const codeDigits = document.getElementById("code-digits");
+  const codeCountdown = document.getElementById("code-countdown");
+  const btnCopyCode = document.getElementById("btn-copy-code");
+  const btnRegenerate = document.getElementById("btn-regenerate");
   const errorMessage = document.getElementById("error-message");
 
   // =========================================================================
@@ -165,103 +168,57 @@
   }
 
   // =========================================================================
-  // QR Code Rendering
+  // Import Code Display
   // =========================================================================
 
-  function renderQrCode(url) {
-    if (typeof QRCode === "undefined") {
-      showError("QR code library not loaded");
-      return;
-    }
+  let countdownInterval = null;
+  let currentImportCode = null;
 
-    try {
-      // Our bundled generator targets EC level M; using L can yield invalid matrices.
-      const errorCorrection = QRCode.ErrorCorrectLevel.M;
-      const qr = new QRCode(0, errorCorrection);
-      qr.addData(url);
-      qr.make();
+  function showCode(code, expiresAt) {
+    currentImportCode = code;
+    codeDigits.textContent = code;
+    btnCopyCode.classList.remove("hidden");
+    btnRegenerate.classList.add("hidden");
 
-      const moduleCount = qr.getModuleCount();
-      const canvas = qrCanvas;
-      const ctx = canvas.getContext("2d");
-      const quietZoneModules = 4;
-      const totalModules = moduleCount + quietZoneModules * 2;
-      const targetSize = 420;
-      const visibleStateWidth = stateImporting?.clientWidth || stateProduct?.clientWidth || stateNoProduct?.clientWidth || 0;
-      const popupStateWidth = Math.floor(visibleStateWidth > 0 ? visibleStateWidth : (document.body.clientWidth - 40));
-      const framePadding = 28; // .qr-frame horizontal padding (14 + 14)
-      const maxDrawableSize = Math.max(200, popupStateWidth - framePadding);
-      const effectiveTarget = Math.min(targetSize, maxDrawableSize);
-      const modulePixelSize = Math.max(5, Math.floor(effectiveTarget / totalModules));
-      const qrSize = totalModules * modulePixelSize;
-      const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    showState(stateQr);
+    setImportState(ImportStates.qr);
 
-      canvas.width = qrSize * dpr;
-      canvas.height = qrSize * dpr;
-      canvas.style.width = `${qrSize}px`;
-      canvas.style.height = `${qrSize}px`;
+    startCountdown(expiresAt);
+  }
 
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, qrSize, qrSize);
-      ctx.fillStyle = "#FFFFFF";
-      ctx.fillRect(0, 0, qrSize, qrSize);
+  function startCountdown(expiresAt) {
+    if (countdownInterval) clearInterval(countdownInterval);
 
-      ctx.fillStyle = "#000000";
-      for (let row = 0; row < moduleCount; row++) {
-        for (let col = 0; col < moduleCount; col++) {
-          if (qr.isDark(row, col)) {
-            const x = (quietZoneModules + col) * modulePixelSize;
-            const y = (quietZoneModules + row) * modulePixelSize;
-            ctx.fillRect(x, y, modulePixelSize, modulePixelSize);
-          }
-        }
+    const expiresMs = new Date(expiresAt).getTime();
+
+    function tick() {
+      const remaining = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      codeCountdown.textContent = `Expires in ${mins}:${secs.toString().padStart(2, "0")}`;
+
+      if (remaining <= 0) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+        codeCountdown.textContent = "Code expired";
+        codeCountdown.classList.add("code-expired");
+        codeDigits.classList.add("code-expired");
+        btnCopyCode.classList.add("hidden");
+        btnRegenerate.classList.remove("hidden");
       }
-
-      const frame = canvas.closest(".qr-frame");
-      if (frame) {
-        frame.style.width = `${qrSize + framePadding}px`;
-        frame.style.maxWidth = "100%";
-      }
-
-      showState(stateQr);
-      setImportState(ImportStates.qr);
-    } catch (err) {
-      console.error("[GenShot TryOn] QR render error:", err);
-      showError("Failed to generate QR code: " + err.message);
     }
+
+    tick();
+    countdownInterval = setInterval(tick, 1000);
   }
 
-  function normalizeQrValue(value) {
-    if (value == null) return "";
-    return String(value).trim();
-  }
-
-  function getQrDebugPayload() {
-    try {
-      return normalizeQrValue(localStorage.getItem("genshot.tryon.qrTestPayload"));
-    } catch {
-      return "";
-    }
-  }
-
-  function buildScannerPayload(sid) {
-    if (!sid) return "";
-    // Compact app-scanner token (shorter than deep links, lower QR density).
-    return `GS2:${sid}`;
-  }
-
-  function resolveQrPayload(data) {
-    const sid = normalizeQrValue(data?.sessionId || data?.session_id || data?.sid);
-    const compactPayload = normalizeQrValue(data?.qr_payload || data?.qrPayload);
-    const legacyPayload = normalizeQrValue(data?.qr_payload_legacy || data?.qrPayloadLegacy);
-
-    if (sid) return buildScannerPayload(sid);
-
-    if (compactPayload) return compactPayload;
-    if (legacyPayload) return legacyPayload;
-
-    return sid;
+  function copyCode() {
+    if (!currentImportCode) return;
+    navigator.clipboard.writeText(currentImportCode).then(() => {
+      const original = btnCopyCode.textContent;
+      btnCopyCode.textContent = "Copied!";
+      setTimeout(() => { btnCopyCode.textContent = original; }, 1500);
+    });
   }
 
   // =========================================================================
@@ -354,7 +311,7 @@
       const item = {
         name: typeof currentProduct.name === "string" && currentProduct.name.trim() ? currentProduct.name.trim() : "Unknown Item",
         brand: typeof currentProduct.brand === "string" ? currentProduct.brand.trim() : "",
-        category: typeof currentProduct.category === "string" && currentProduct.category.trim() ? currentProduct.category.trim() : "top",
+        category: typeof currentProduct.category === "string" && currentProduct.category.trim() ? currentProduct.category.trim() : "tshirt",
         price: Number.isFinite(Number(currentProduct.price)) ? Number(currentProduct.price) : null,
         currency: typeof currentProduct.currency === "string" && currentProduct.currency.trim() ? currentProduct.currency.trim() : "USD",
         color: typeof currentProduct.color === "string" ? currentProduct.color.trim() : "",
@@ -372,16 +329,13 @@
       });
 
       if (response?.success && response.data) {
-        const debugPayload = getQrDebugPayload();
-        const qrUrl = debugPayload || resolveQrPayload(response.data);
-        if (!qrUrl) {
+        const code = response.data.import_code || response.data.importCode;
+        const expiresAt = response.data.code_expires_at || response.data.codeExpiresAt;
+        if (!code) {
           showError("Backend returned invalid session data");
           return;
         }
-        if (debugPayload) {
-          console.info("[GenShot TryOn] QR test payload override active:", debugPayload);
-        }
-        renderQrCode(qrUrl);
+        showCode(code, expiresAt);
       } else {
         showError(response?.error || "Failed to create import session");
       }
@@ -406,6 +360,16 @@
 
   btnRetry.addEventListener("click", () => {
     extractProduct();
+  });
+
+  btnCopyCode.addEventListener("click", () => {
+    copyCode();
+  });
+
+  btnRegenerate.addEventListener("click", () => {
+    codeDigits.classList.remove("code-expired");
+    codeCountdown.classList.remove("code-expired");
+    createImportSession();
   });
 
   // =========================================================================

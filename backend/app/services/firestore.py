@@ -155,6 +155,22 @@ def update_import_session(sid: str, data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def find_pending_session_by_code(code: str) -> Optional[Dict[str, Any]]:
+    """Find a pending import session by its 4-digit code."""
+    docs = (
+        _db()
+        .collection("import_sessions")
+        .where(filter=FieldFilter("import_code", "==", code))
+        .where(filter=FieldFilter("status", "==", "pending"))
+        .stream()
+    )
+    for doc in docs:
+        data = doc.to_dict()
+        data["id"] = doc.id
+        return data
+    return None
+
+
 # ── Generations ──────────────────────────────────────────────────────
 
 def create_generation(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -185,6 +201,18 @@ def update_generation(gen_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     result = ref.get().to_dict()
     result["id"] = gen_id
     return result
+
+
+def save_generation(gen_id: str, saved_selection: List[Dict[str, Any]], saved_at: str) -> Dict[str, Any]:
+    """Mark a generation as saved with idempotent metadata updates."""
+    return update_generation(
+        gen_id,
+        {
+            "saved": True,
+            "saved_at": saved_at,
+            "saved_selection": saved_selection,
+        },
+    )
 
 
 def get_generations_for_user(uid: str) -> List[Dict[str, Any]]:

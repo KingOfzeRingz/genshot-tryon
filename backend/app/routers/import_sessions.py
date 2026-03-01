@@ -7,14 +7,15 @@ mobile app (auth required).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth.dependencies import get_current_user
 from app.config import get_settings
-from app.models.item import ImportSession, ImportSessionClaim, ImportSessionCreate, Item
+from app.models.item import ImportCodeClaim, ImportSession, ImportSessionClaim, ImportSessionCreate, Item
 from app.services import firestore as db
 from app.utils.qr import (
     generate_qr_payload,
@@ -44,6 +45,28 @@ def _as_optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_demo_category(raw_category: str) -> str:
+    key = raw_category.strip().lower()
+    if key in {"shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "footwear"}:
+        return "shoes"
+    if key in {"outerwear", "jacket", "coat", "blazer"}:
+        return "outerwear"
+    if key in {"bottom", "bottoms", "pants", "trousers", "jeans", "shorts", "skirt"}:
+        return "bottom"
+    if key in {"top", "tops", "shirt", "t-shirt", "tshirt", "tee", "blouse", "dress"}:
+        return "top"
+    return "top"
+
+
+def _demo_name_for_category(category: str) -> str:
+    return {
+        "top": "T-Shirt",
+        "bottom": "Pants",
+        "outerwear": "Jacket",
+        "shoes": "Sneakers",
+    }.get(category, "T-Shirt")
 
 
 @router.post(
@@ -76,14 +99,18 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
         # Resolve product_url: extension sends `productUrl` (camelCase)
         product_url = _as_string(raw.get("product_url"), "") or _as_string(raw.get("productUrl"), "")
 
-        # Validate category against allowed values
-        category = _as_string(raw.get("category"), "top").lower()
-        valid_categories = {"top", "bottom", "outerwear", "shoes", "accessory"}
-        if category not in valid_categories:
-            category = "top"
+        # Demo simplification: map all imported garments into 4 canonical categories.
+        # Input can come in as `category`, `garment_type`, or `garmentType`.
+        source_category = (
+            _as_string(raw.get("category"), "")
+            or _as_string(raw.get("garment_type"), "")
+            or _as_string(raw.get("garmentType"), "")
+        )
+        category = _normalize_demo_category(source_category)
+        normalized_name = _demo_name_for_category(category)
 
         item = Item(
-            name=_as_string(raw.get("name"), "Unknown Item"),
+            name=normalized_name,
             brand=_as_string(raw.get("brand"), ""),
             category=category,
             image_url=image_url,
@@ -111,7 +138,23 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
     qr = generate_qr_payload(session_id, sig)
     qr_legacy = generate_qr_payload_legacy(session_id, sig)
 
-    logger.info("Created import session %s with %d items", session_id, len(items))
+    # Generate a unique 4-digit import code
+    import_code: Optional[str] = None
+    for _ in range(5):
+        candidate = f"{random.randint(0, 9999):04d}"
+        if db.find_pending_session_by_code(candidate) is None:
+            import_code = candidate
+            break
+
+    code_expires_at: Optional[str] = None
+    if import_code:
+        code_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        db.update_import_session(session_id, {
+            "import_code": import_code,
+            "code_expires_at": code_expires_at,
+        })
+
+    logger.info("Created import session %s with %d items (code=%s)", session_id, len(items), import_code)
 
     return {
         "session_id": session_id,
@@ -119,6 +162,8 @@ async def create_import_session(payload: ImportSessionCreate) -> Dict[str, Any]:
         "qr_payload": qr,
         "qr_payload_legacy": qr_legacy,
         "item_count": len(items),
+        "import_code": import_code,
+        "code_expires_at": code_expires_at,
     }
 
 
@@ -184,6 +229,62 @@ async def claim_import_session(
         session_id,
         user_id,
         mode,
+        len(claimed_items),
+    )
+
+    return {
+        "session_id": session_id,
+        "status": "claimed",
+        "items": claimed_items,
+    }
+
+
+@router.post(
+    "/claim-by-code",
+    summary="Claim an import session by 4-digit code (auth required)",
+)
+async def claim_import_session_by_code(
+    payload: ImportCodeClaim,
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Called by the mobile app with a 4-digit code entered by the user."""
+    session = db.find_pending_session_by_code(payload.code)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Invalid code.")
+
+    # Check expiry
+    expires_str = session.get("code_expires_at", "")
+    if expires_str:
+        expires_at = datetime.fromisoformat(expires_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=410, detail="Code expired.")
+
+    if session.get("status") == "claimed":
+        raise HTTPException(status_code=409, detail="Already imported.")
+
+    session_id = session["id"]
+
+    # Copy items to user's wardrobe
+    raw_items: List[Dict[str, Any]] = session.get("items", [])
+    claimed_items: List[Dict[str, Any]] = []
+
+    for raw in raw_items:
+        added = db.add_item_to_user(user_id, raw)
+        claimed_items.append(added)
+
+    # Mark session as claimed
+    db.update_import_session(session_id, {
+        "status": "claimed",
+        "user_id": user_id,
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    logger.info(
+        "Import session claimed by code: session=%s user=%s items=%d",
+        session_id,
+        user_id,
         len(claimed_items),
     )
 

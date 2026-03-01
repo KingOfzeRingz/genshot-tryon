@@ -117,9 +117,9 @@ function generateIcon(size) {
       }
 
       if (inside) {
-        rgba[idx] = 0x6c;
-        rgba[idx + 1] = 0x5c;
-        rgba[idx + 2] = 0xe7;
+        rgba[idx] = 0x1a;
+        rgba[idx + 1] = 0x1a;
+        rgba[idx + 2] = 0x1a;
         rgba[idx + 3] = 255;
 
         const cx = size / 2;

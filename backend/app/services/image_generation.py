@@ -1,14 +1,18 @@
 """Virtual try-on image generation orchestrator.
 
-Uses the google-genai SDK with Vertex AI backend for native image generation.
+Uses a two-stage pipeline for consistency:
+1) Generate internal reference outfit images (front + profile)
+2) Generate final multi-angle outputs conditioned on those references
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
-from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai.types import GenerateContentConfig, Modality, Part
@@ -23,21 +27,32 @@ from app.utils.image_processing import resize_image
 logger = logging.getLogger(__name__)
 
 _client: Optional[genai.Client] = None
+_executor = ThreadPoolExecutor(max_workers=4)
 
+_INTERNAL_REFERENCE_ANGLES: List[Tuple[str, str]] = [
+    ("front", "full body front-facing, head to feet, neutral stance"),
+    ("profile", "full body right-side profile, neutral stance"),
+]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+_FINAL_ANGLE_INSTRUCTIONS: Dict[str, str] = {
+    "front": "full body front-facing, head to feet, natural neutral pose",
+    "profile": "full body side profile, head to feet, natural neutral pose",
+    "three_quarter": "full body 45-degree three-quarter view, natural pose",
+    "back": "full body back-facing, head to feet, natural neutral pose",
+}
+
 
 def _get_client() -> genai.Client:
     """Return a cached genai Client configured for Vertex AI."""
     global _client
     if _client is not None:
         return _client
+
     settings = get_settings()
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.GCP_PROJECT_ID)
     os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.VERTEX_IMAGE_LOCATION)
     os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
+
     _client = genai.Client()
     logger.info(
         "google-genai client initialised (project=%s, location=%s)",
@@ -56,11 +71,17 @@ def _format_model_error(exc: Exception) -> str:
     return f"{exc_name}: {message}" if message else exc_name
 
 
-def _download_reference_photo(url: str) -> bytes:
+def _download_image(url: str) -> Optional[bytes]:
+    """Download an image. Returns None on failure."""
     import httpx
-    resp = httpx.get(url, timeout=30.0, follow_redirects=True)
-    resp.raise_for_status()
-    return resp.content
+
+    try:
+        resp = httpx.get(url, timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.content if resp.content else None
+    except Exception as exc:
+        logger.warning("Image download failed: url=%s error=%s", url[:120], exc)
+        return None
 
 
 def _build_garment_description(items: List[Item]) -> str:
@@ -79,83 +100,117 @@ def _build_garment_description(items: List[Item]) -> str:
 
 def _build_body_description(body: BodyVector, user: Optional[UserProfile] = None) -> str:
     lines: List[str] = []
+    if user and user.gender:
+        lines.append(user.gender)
+
     effective_height = body.height_cm or (user.height_cm if user else None)
     if effective_height:
         lines.append(f"height {effective_height} cm")
     if user and user.weight_kg:
         lines.append(f"weight {user.weight_kg} kg")
+
     if body.chest_cm:
         lines.append(f"chest {body.chest_cm} cm")
     if body.waist_cm:
         lines.append(f"waist {body.waist_cm} cm")
     if body.hip_cm:
         lines.append(f"hip {body.hip_cm} cm")
-    shoulder_width = body.shoulder_width_cm or body.shoulder_cm
-    if shoulder_width:
-        lines.append(f"shoulder width {shoulder_width} cm")
+
+    shoulder = body.shoulder_width_cm or body.shoulder_cm
+    if shoulder:
+        lines.append(f"shoulder width {shoulder} cm")
     if body.torso_length_cm:
         lines.append(f"torso length {body.torso_length_cm} cm")
     if body.arm_length_cm:
         lines.append(f"arm length {body.arm_length_cm} cm")
     if body.inseam_cm:
         lines.append(f"inseam {body.inseam_cm} cm")
+    if body.neck_cm:
+        lines.append(f"neck {body.neck_cm} cm")
+    if body.thigh_cm:
+        lines.append(f"thigh {body.thigh_cm} cm")
+
     return ", ".join(lines) if lines else "average build"
 
 
-# ---------------------------------------------------------------------------
-# Gemini native image generation via google-genai
-# ---------------------------------------------------------------------------
+def _sanitize_final_angles(final_angles: Optional[List[str]]) -> List[str]:
+    if not final_angles:
+        return ["front", "profile", "three_quarter", "back"]
+
+    ordered: List[str] = []
+    for angle in final_angles:
+        key = angle.lower().strip()
+        if key in _FINAL_ANGLE_INSTRUCTIONS and key not in ordered:
+            ordered.append(key)
+
+    return ordered or ["front", "profile", "three_quarter", "back"]
+
 
 def _generate_with_gemini(
-    reference_bytes: bytes,
+    reference_images: List[bytes],
+    garment_images: List[Tuple[Item, bytes]],
     garment_description: str,
     body_description: str,
-    angle: str = "front-facing",
-    model_name: Optional[str] = None,
+    angle_name: str,
+    angle_instruction: str,
+    stage: str,
 ) -> Optional[bytes]:
-    """Generate a try-on image via Gemini native image generation.
+    """Generate an image with Gemini image models.
 
-    Returns PNG bytes or ``None`` on failure.
+    ``stage`` is either ``internal_reference`` or ``final_tryon``.
     """
     client = _get_client()
-
-    prompt = (
-        "You are a virtual try-on system. Generate a single photorealistic image "
-        "of the person in the reference photo wearing the following clothing: "
-        f"{garment_description}. "
-        f"Body proportions: {body_description}. "
-        f"Camera angle: {angle} view. "
-        "CRITICAL: preserve the person's face, hairstyle, skin tone, and body shape "
-        "exactly as in the reference photo. "
-        "Natural studio lighting, clean neutral background. "
-        "High-quality editorial fashion photography style. "
-        "Output only the image, no text."
-    )
-
-    image_part = Part.from_bytes(data=reference_bytes, mime_type="image/png")
-
     settings = get_settings()
-    models_to_try = [model_name] if model_name else settings.tryon_image_models
+
+    if stage == "internal_reference":
+        prompt = (
+            "Generate a photorealistic reference image of the person wearing the requested clothes. "
+            f"Use this camera framing: {angle_instruction}. "
+            f"Garments: {garment_description}. "
+            f"Body measurements and proportions: {body_description}. "
+            "Keep face, body shape, and identity exactly consistent with the provided person reference image. "
+            "Natural studio lighting, neutral background, no text."
+        )
+    else:
+        prompt = (
+            "Generate a photorealistic final virtual try-on image using the provided internal reference images "
+            "as strict consistency anchors for face, body shape, clothing fit, and garment details. "
+            f"Camera framing: {angle_instruction}. "
+            f"Garments: {garment_description}. "
+            f"Body measurements and proportions: {body_description}. "
+            "Keep identity and fit fully consistent across all angles. "
+            "Natural studio lighting, neutral background, no text."
+        )
+
+    contents: List[Any] = [
+        Part.from_bytes(data=image_bytes, mime_type="image/png")
+        for image_bytes in reference_images
+    ]
+    for _item, image_bytes in garment_images:
+        contents.append(Part.from_bytes(data=image_bytes, mime_type="image/png"))
+    contents.append(prompt)
+
+    models_to_try = settings.tryon_image_models
     if not models_to_try:
-        logger.error("Try-on image generation has no configured models.")
+        logger.error("Try-on generation has no configured models.")
         return None
 
-    total_models = len(models_to_try)
-    for index, mname in enumerate(models_to_try, start=1):
+    total = len(models_to_try)
+    for idx, model_name in enumerate(models_to_try, start=1):
         try:
             logger.info(
-                "Try-on generation attempt: provider=google, model=%s, location=%s, angle=%s, attempt=%d/%d",
-                mname,
-                settings.VERTEX_IMAGE_LOCATION,
-                angle,
-                index,
-                total_models,
+                "Try-on attempt: stage=%s model=%s angle=%s attempt=%d/%d",
+                stage,
+                model_name,
+                angle_name,
+                idx,
+                total,
             )
             response = client.models.generate_content(
-                model=mname,
-                contents=[image_part, prompt],
+                model=model_name,
+                contents=contents,
                 config=GenerateContentConfig(
-                    temperature=0.4,
+                    temperature=0.35,
                     response_modalities=[Modality.TEXT, Modality.IMAGE],
                 ),
             )
@@ -165,119 +220,242 @@ def _generate_with_gemini(
                     if part.inline_data and part.inline_data.data:
                         data = part.inline_data.data
                         logger.info(
-                            "Try-on generation success: provider=google, model=%s, angle=%s, bytes=%d",
-                            mname,
-                            angle,
+                            "Try-on success: stage=%s model=%s angle=%s bytes=%d",
+                            stage,
+                            model_name,
+                            angle_name,
                             len(data),
                         )
                         return data
 
             logger.warning(
-                "Try-on generation returned no inline image: provider=google, model=%s, angle=%s",
-                mname,
-                angle,
+                "Try-on no image returned: stage=%s model=%s angle=%s",
+                stage,
+                model_name,
+                angle_name,
             )
-
         except Exception as exc:
             logger.warning(
-                "Try-on generation failed: provider=google, model=%s, angle=%s, error=%s",
-                mname,
-                angle,
+                "Try-on failed: stage=%s model=%s angle=%s error=%s",
+                stage,
+                model_name,
+                angle_name,
                 _format_model_error(exc),
             )
-            if index < total_models:
-                logger.info(
-                    "Try-on generation fallback: angle=%s, next_attempt=%d/%d",
-                    angle,
-                    index + 1,
-                    total_models,
-                )
             continue
 
     return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+async def _generate_angle_batch(
+    reference_images: List[bytes],
+    garment_images: List[Tuple[Item, bytes]],
+    garment_description: str,
+    body_description: str,
+    angle_defs: List[Tuple[str, str]],
+    stage: str,
+) -> Dict[str, bytes]:
+    """Generate a batch of angles concurrently."""
+    loop = asyncio.get_running_loop()
+
+    async def _run_angle(angle_name: str, instruction: str) -> Tuple[str, Optional[bytes]]:
+        image = await loop.run_in_executor(
+            _executor,
+            _generate_with_gemini,
+            reference_images,
+            garment_images,
+            garment_description,
+            body_description,
+            angle_name,
+            instruction,
+            stage,
+        )
+        return angle_name, image
+
+    tasks = [_run_angle(name, instruction) for name, instruction in angle_defs]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    images_by_angle: Dict[str, bytes] = {}
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.error("Angle generation exception (%s): %s", stage, result)
+            continue
+        angle_name, image_bytes = result
+        if image_bytes:
+            images_by_angle[angle_name] = image_bytes
+        else:
+            logger.warning("No generated image for stage=%s angle=%s", stage, angle_name)
+
+    return images_by_angle
+
+
+def _upload_image_set(
+    user_id: str,
+    gen_id: str,
+    stage_prefix: str,
+    ordered_angles: List[str],
+    images_by_angle: Dict[str, bytes],
+) -> List[Dict[str, str]]:
+    uploaded: List[Dict[str, str]] = []
+
+    for angle_name in ordered_angles:
+        image_bytes = images_by_angle.get(angle_name)
+        if image_bytes is None:
+            continue
+
+        path = f"generations/{user_id}/{gen_id}_{stage_prefix}_{angle_name}.png"
+        try:
+            url = upload_image(get_settings().GCS_BUCKET, path, image_bytes, "image/png")
+            uploaded.append({"angle": angle_name, "url": url})
+        except Exception as exc:
+            logger.error("Upload failed: stage=%s angle=%s error=%s", stage_prefix, angle_name, exc)
+
+    return uploaded
+
 
 async def generate_tryon_images(
     user: UserProfile,
     items: List[Item],
     body_vector: BodyVector,
-) -> List[str]:
-    """Generate virtual try-on images and upload them to GCS.
+    final_angles: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Generate virtual try-on images using a two-stage consistency pipeline.
 
-    Pipeline:
-      1. Front-facing image  — configured Google model chain
-      2. 45-degree image     — configured Google model chain
-      3. Close-up detail     — configured Google model chain
-
-    Returns a list of public GCS URLs.
+    Returns
+    -------
+    Dict with keys:
+      - internal_reference_images: [{angle, url}]
+      - final_images: [{angle, url}]
+      - final_image_urls: [url]
+      - body_vector_used: dict
+      - final_angles: [angle]
     """
     settings = get_settings()
     if not settings.tryon_image_models:
-        raise ValueError(
-            "TRYON_IMAGE_MODELS is required and must contain at least one model id."
-        )
+        raise ValueError("TRYON_IMAGE_MODELS is required and must contain at least one model id.")
 
     logger.info(
-        "Try-on generation run config: user=%s, models=%s, location=%s",
+        "Try-on generation start: user=%s items=%d models=%s",
         user.uid,
+        len(items),
         settings.tryon_image_models,
-        settings.VERTEX_IMAGE_LOCATION,
     )
-
-    garment_desc = _build_garment_description(items)
-    body_desc = _build_body_description(body_vector, user=user)
 
     if not user.reference_photo_url:
         logger.error("User %s has no reference photo.", user.uid)
-        return []
+        return {
+            "internal_reference_images": [],
+            "final_images": [],
+            "final_image_urls": [],
+            "body_vector_used": body_vector.model_dump(exclude_none=True),
+            "final_angles": _sanitize_final_angles(final_angles),
+        }
+
+    reference_raw = _download_image(user.reference_photo_url)
+    if reference_raw is None:
+        logger.error("Failed to download reference photo for user %s.", user.uid)
+        return {
+            "internal_reference_images": [],
+            "final_images": [],
+            "final_image_urls": [],
+            "body_vector_used": body_vector.model_dump(exclude_none=True),
+            "final_angles": _sanitize_final_angles(final_angles),
+        }
 
     try:
-        ref_bytes = _download_reference_photo(user.reference_photo_url)
-        ref_bytes = resize_image(ref_bytes, max_size=1024)
+        base_reference = resize_image(reference_raw, max_size=1024)
     except Exception as exc:
-        logger.error("Failed to fetch reference photo: %s", exc)
-        return []
+        logger.error("Failed to resize reference photo: %s", exc)
+        return {
+            "internal_reference_images": [],
+            "final_images": [],
+            "final_image_urls": [],
+            "body_vector_used": body_vector.model_dump(exclude_none=True),
+            "final_angles": _sanitize_final_angles(final_angles),
+        }
 
-    urls: List[str] = []
+    garment_images: List[Tuple[Item, bytes]] = []
+    for item in items:
+        if not item.image_url:
+            continue
+        image = _download_image(item.image_url)
+        if image:
+            try:
+                image = resize_image(image, max_size=768)
+            except Exception:
+                pass
+            garment_images.append((item, image))
+
+    garment_desc = _build_garment_description(items)
+    body_desc = _build_body_description(body_vector, user=user)
+    final_angle_list = _sanitize_final_angles(final_angles)
     gen_id = uuid.uuid4().hex[:12]
 
-    # ── Front-facing image ────────────────────────────────────────────
-    front_bytes = _generate_with_gemini(ref_bytes, garment_desc, body_desc, angle="front-facing")
-    if front_bytes:
-        path = f"generations/{user.uid}/{gen_id}_front.png"
-        url = upload_image(settings.GCS_BUCKET, path, front_bytes, "image/png")
-        urls.append(url)
-        logger.info("Uploaded front try-on image: %s", url)
-    else:
-        logger.warning("Front-facing image generation failed entirely.")
-
-    # ── 45-degree angle image ─────────────────────────────────────────
-    side_bytes = _generate_with_gemini(
-        ref_bytes, garment_desc, body_desc, angle="45-degree three-quarter"
+    logger.info(
+        "Try-on context: garment_images=%d/%d body=%s final_angles=%s",
+        len(garment_images),
+        len(items),
+        body_desc[:140],
+        final_angle_list,
     )
-    if side_bytes:
-        path = f"generations/{user.uid}/{gen_id}_side.png"
-        url = upload_image(settings.GCS_BUCKET, path, side_bytes, "image/png")
-        urls.append(url)
-        logger.info("Uploaded 45-degree try-on image: %s", url)
-    else:
-        logger.warning("45-degree image generation failed.")
 
-    # ── Close-up detail image ─────────────────────────────────────────
-    detail_bytes = _generate_with_gemini(
-        ref_bytes, garment_desc, body_desc,
-        angle="close-up torso detail showing fabric texture and fit"
+    # Stage A: internal references (front + profile)
+    internal_by_angle = await _generate_angle_batch(
+        reference_images=[base_reference],
+        garment_images=garment_images,
+        garment_description=garment_desc,
+        body_description=body_desc,
+        angle_defs=_INTERNAL_REFERENCE_ANGLES,
+        stage="internal_reference",
     )
-    if detail_bytes:
-        path = f"generations/{user.uid}/{gen_id}_detail.png"
-        url = upload_image(settings.GCS_BUCKET, path, detail_bytes, "image/png")
-        urls.append(url)
-        logger.info("Uploaded detail try-on image: %s", url)
-    else:
-        logger.warning("Detail image generation failed.")
 
-    return urls
+    internal_order = [angle for angle, _ in _INTERNAL_REFERENCE_ANGLES]
+    internal_uploaded = _upload_image_set(
+        user.uid,
+        gen_id,
+        "internal",
+        internal_order,
+        internal_by_angle,
+    )
+
+    internal_refs: List[bytes] = []
+    if "front" in internal_by_angle:
+        internal_refs.append(internal_by_angle["front"])
+    if "profile" in internal_by_angle:
+        internal_refs.append(internal_by_angle["profile"])
+    if not internal_refs:
+        internal_refs = [base_reference]
+
+    # Stage B: final outputs based on internal references
+    final_defs = [(angle, _FINAL_ANGLE_INSTRUCTIONS[angle]) for angle in final_angle_list]
+    final_by_angle = await _generate_angle_batch(
+        reference_images=internal_refs,
+        garment_images=garment_images,
+        garment_description=garment_desc,
+        body_description=body_desc,
+        angle_defs=final_defs,
+        stage="final_tryon",
+    )
+
+    final_uploaded = _upload_image_set(
+        user.uid,
+        gen_id,
+        "final",
+        final_angle_list,
+        final_by_angle,
+    )
+
+    logger.info(
+        "Try-on generation complete: user=%s internal_refs=%d final=%d",
+        user.uid,
+        len(internal_uploaded),
+        len(final_uploaded),
+    )
+
+    return {
+        "internal_reference_images": internal_uploaded,
+        "final_images": final_uploaded,
+        "final_image_urls": [entry["url"] for entry in final_uploaded],
+        "body_vector_used": body_vector.model_dump(exclude_none=True),
+        "final_angles": final_angle_list,
+    }
